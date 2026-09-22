@@ -139,6 +139,30 @@ class EvidenceRevisionError(EvidenceStoreError):
     """Raised for an unknown, incomplete, or dependency-mismatched evidence revision."""
 
 
+class CatalogError(ToolRecapError):
+    """Base exception for deterministic Season Evidence Catalog failures."""
+
+
+class CatalogValidationError(CatalogError):
+    """Raised when a Catalog violates identity, coverage, ordering, or hash rules."""
+
+    def __init__(self, message: str, *, issue_codes: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.issue_codes = issue_codes
+
+
+class CatalogPackingError(CatalogError):
+    """Raised when packed Catalog data is malformed or not losslessly reversible."""
+
+
+class CatalogStoreError(CatalogError):
+    """Raised for Catalog checkpoint persistence or integrity failures."""
+
+
+class CatalogCapacityError(CatalogError):
+    """Raised for invalid explicit Catalog capacity configuration."""
+
+
 class CancelledError(ToolRecapError):
     """Raised when an operation is cancelled."""
 

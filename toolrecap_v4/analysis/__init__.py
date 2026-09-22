@@ -12,6 +12,15 @@ from .dependencies import (
     is_signature_valid,
 )
 from .evidence_store import EvidenceCompleteness, EvidenceQueryResult, EvidenceStore
+from .finalizer import (
+    CapacityPreflight,
+    CatalogBuilder,
+    CatalogService,
+    CatalogStore,
+    SeasonEvidenceCatalog,
+    pack_catalog,
+    unpack_catalog,
+)
 from .models import AudioSelection, DialogueReference, Evidence, PreparedEpisode, Transcript, TranscriptCue
 from .scanner import ScannerChunkPolicy, ScannerConfig, ScannerProjectResult, ScannerService, compute_evidence_revision
 
@@ -23,6 +32,11 @@ __all__ = [
     "EvidenceCompleteness",
     "EvidenceQueryResult",
     "EvidenceStore",
+    "CapacityPreflight",
+    "CatalogBuilder",
+    "CatalogService",
+    "CatalogStore",
+    "SeasonEvidenceCatalog",
     "PreparedEpisode",
     "Transcript",
     "TranscriptCue",
@@ -31,6 +45,8 @@ __all__ = [
     "ScannerProjectResult",
     "ScannerService",
     "compute_evidence_revision",
+    "pack_catalog",
+    "unpack_catalog",
     "compute_embedded_track_signature",
     "compute_sidecar_signature",
     "compute_source_signature",

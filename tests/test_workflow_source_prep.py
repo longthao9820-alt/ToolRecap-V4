@@ -429,10 +429,13 @@ def test_imported_final_json_zero_prep_and_zero_gateway(workflow_env: dict[str, 
 
     mock_pipeline = MagicMock(spec=SourcePreparationPipeline)
     mock_gw = MagicMock(spec=GatewayClient)
+    mock_catalog = MagicMock()
+    mock_catalog.build_or_load.side_effect = AssertionError("Catalog must not run for imported Final JSON")
     workflow = ProjectWorkflow(
         persistence=storage,
         gateway_client=mock_gw,
         source_preparation_pipeline=mock_pipeline,
+        catalog_service=mock_catalog,
     )
 
     project_id = "proj-import-zero-prep-01"
@@ -494,6 +497,7 @@ def test_imported_final_json_zero_prep_and_zero_gateway(workflow_env: dict[str, 
 
     # Zero Gateway calls made
     assert mock_gw.submit_text_chat.call_count == 0
+    assert mock_catalog.build_or_load.call_count == 0
 
     # Project reached COMPLETED status
     assert res_state["status"] == ProjectStatus.COMPLETED.value

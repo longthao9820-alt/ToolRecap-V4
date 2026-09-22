@@ -30,6 +30,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from toolrecap_v4.analysis.cache import AnalysisCacheManager
+from toolrecap_v4.analysis.finalizer import CatalogService
 from toolrecap_v4.analysis.models import PreparedEpisode
 from toolrecap_v4.analysis.scanner import ScannerChunkPolicy, ScannerConfig, ScannerService
 from toolrecap_v4.analysis.source_prep.pipeline import SourcePreparationPipeline
@@ -79,6 +80,7 @@ class ProjectStatus(str, enum.Enum):
     JSON_READY = "json_ready"
     PREPARED = "prepared"
     EVIDENCE_READY = "evidence_ready"
+    CATALOG_READY = "catalog_ready"
     RENDERING = "rendering"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -119,6 +121,7 @@ class WorkflowCallbacks:
     on_source_preparation_progress: Optional[Callable[..., None]] = None
     on_episode_prepared: Optional[Callable[[str, Dict[str, Any]], None]] = None
     on_evidence_ready: Optional[Callable[[str, Dict[str, int]], None]] = None
+    on_catalog_ready: Optional[Callable[[str, Dict[str, Any]], None]] = None
 
 
 def resolve_sources(
@@ -315,7 +318,13 @@ def reconcile_project_state(
                 evidence_checkpoint = persistence.load_checkpoint(project_id, "evidence")
             except PersistenceError:
                 evidence_checkpoint = None
-            if evidence_checkpoint and evidence_checkpoint.get("status") == "completed":
+            try:
+                catalog_checkpoint = persistence.load_checkpoint(project_id, "catalog")
+            except PersistenceError:
+                catalog_checkpoint = None
+            if catalog_checkpoint and catalog_checkpoint.get("status") == "completed":
+                project_state["status"] = ProjectStatus.CATALOG_READY.value
+            elif evidence_checkpoint and evidence_checkpoint.get("status") == "completed":
                 project_state["status"] = ProjectStatus.EVIDENCE_READY.value
             elif persistence.has_prepared_manifest(project_id):
                 project_state["status"] = ProjectStatus.PREPARED.value
@@ -341,6 +350,7 @@ class ProjectWorkflow:
         storage_root: Optional[Path | str] = None,
         source_preparation_pipeline: Optional[SourcePreparationPipeline] = None,
         scanner_service: Optional[ScannerService] = None,
+        catalog_service: Optional[CatalogService] = None,
     ) -> None:
         self.persistence = persistence or ProjectPersistence(storage_root=storage_root)
         self.settings_manager = settings_manager or SettingsManager(persistence=self.persistence)
@@ -348,6 +358,7 @@ class ProjectWorkflow:
         self.voice_adapter = voice_adapter
         self.source_preparation_pipeline = source_preparation_pipeline
         self.scanner_service = scanner_service
+        self.catalog_service = catalog_service
 
     def create_project(
         self,
@@ -805,7 +816,7 @@ class ProjectWorkflow:
                 }
                 self.persistence.save_checkpoint(project_id, "evidence", evidence_summary)
                 now_ready = datetime.now(timezone.utc).isoformat()
-                phase5_msg = "Analysis pipeline stopped: Full Episode Evidence is complete (EVIDENCE_READY); Phase 5 Season Evidence Catalog is not implemented."
+                phase5_msg = "Full Episode Evidence is complete (EVIDENCE_READY); Season Evidence Catalog is pending."
                 state["status"] = ProjectStatus.EVIDENCE_READY.value
                 state["evidence"] = evidence_summary
                 state["error"] = phase5_msg
@@ -816,10 +827,59 @@ class ProjectWorkflow:
                     callbacks.on_evidence_ready(evidence_result.evidence_revision, evidence_result.episode_counts)
                 if callbacks and callbacks.on_status_change:
                     callbacks.on_status_change(ProjectStatus.EVIDENCE_READY.value)
-                phase5_err = AnalysisPipelineUnavailableError(phase5_msg)
+
+                catalog_service = self.catalog_service or CatalogService(self.persistence.root)
+                try:
+                    catalog_result = catalog_service.build_or_load(
+                        project_id=project_id,
+                        evidence_revision=evidence_result.evidence_revision,
+                        ordered_episodes=prepared_models,
+                        cancellation_token=cancellation_token,
+                    )
+                except CancelledError:
+                    raise
+                except Exception as exc:
+                    state["status"] = ProjectStatus.FAILED.value
+                    state["error"] = f"Catalog failed: {exc}"
+                    now_err = datetime.now(timezone.utc).isoformat()
+                    state.setdefault("timestamps", {})["failed_at"] = now_err
+                    state["timestamps"]["updated_at"] = now_err
+                    self.persistence.save_project(state)
+                    if callbacks and callbacks.on_status_change:
+                        callbacks.on_status_change(ProjectStatus.FAILED.value)
+                    if callbacks and callbacks.on_error:
+                        callbacks.on_error(exc, None)
+                    raise
+
+                catalog_summary = {
+                    "status": "completed",
+                    "catalog_version": catalog_result.catalog.catalog_version,
+                    "catalog_hash": catalog_result.catalog.catalog_hash,
+                    "evidence_revision": catalog_result.catalog.evidence_revision,
+                    "episode_count": len(catalog_result.catalog.ordered_episodes),
+                    "evidence_count": len(catalog_result.catalog.items),
+                    "ids_digest": catalog_result.catalog.completeness.ids_digest,
+                    "capacity": catalog_result.capacity.to_dict(),
+                    "reused": catalog_result.reused,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }
+                self.persistence.save_checkpoint(project_id, "catalog", catalog_summary)
+                now_catalog = datetime.now(timezone.utc).isoformat()
+                phase6_msg = "Analysis pipeline stopped: Complete Season Evidence Catalog is ready (CATALOG_READY); Phase 6 Season Planner is not implemented."
+                state["status"] = ProjectStatus.CATALOG_READY.value
+                state["catalog"] = catalog_summary
+                state["error"] = phase6_msg
+                state.setdefault("timestamps", {})["catalog_ready_at"] = now_catalog
+                state["timestamps"]["updated_at"] = now_catalog
+                self.persistence.save_project(state)
+                if callbacks and callbacks.on_catalog_ready:
+                    callbacks.on_catalog_ready(catalog_result.catalog.catalog_hash, catalog_summary)
+                if callbacks and callbacks.on_status_change:
+                    callbacks.on_status_change(ProjectStatus.CATALOG_READY.value)
+                phase6_err = AnalysisPipelineUnavailableError(phase6_msg)
                 if callbacks and callbacks.on_error:
-                    callbacks.on_error(phase5_err, None)
-                raise phase5_err
+                    callbacks.on_error(phase6_err, None)
+                raise phase6_err
 
             # Step 2: Source integrity check (source changes fail no substitution)
             verify_source_integrity(state["source_fingerprints"], cancellation_token=cancellation_token)

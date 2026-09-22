@@ -45,7 +45,7 @@ class Gateway:
         return GatewayResult(raw_response=raw, bytes_sent=1234, metadata={"status_code": 200, "duration_ms": 2})
 
 
-def test_workflow_reaches_evidence_ready_and_stops_before_phase5(tmp_path):
+def test_workflow_reaches_catalog_ready_and_stops_before_phase6(tmp_path):
     source = tmp_path / "episode01.mkv"
     source.write_bytes(b"synthetic source")
     fingerprint = compute_file_fingerprint(source)
@@ -79,11 +79,22 @@ def test_workflow_reaches_evidence_ready_and_stops_before_phase5(tmp_path):
         persistence=persistence, gateway_client=gateway,
         source_preparation_pipeline=Pipeline(prepared), scanner_service=scanner,
     )
-    with pytest.raises(AnalysisPipelineUnavailableError, match="Phase 5"):
+    with pytest.raises(AnalysisPipelineUnavailableError, match="Phase 6"):
         workflow.start_project("project-1")
     saved = persistence.load_project("project-1")
-    assert saved["status"] == ProjectStatus.EVIDENCE_READY.value
+    assert saved["status"] == ProjectStatus.CATALOG_READY.value
     assert saved["evidence"]["total_evidence_count"] == 1
+    assert saved["catalog"]["evidence_count"] == 1
+    assert saved["catalog"]["episode_count"] == 1
+    assert saved["catalog"]["capacity"]["status"] == "UNKNOWN"
     assert persistence.load_checkpoint("project-1", "evidence")["status"] == "completed"
+    assert persistence.load_checkpoint("project-1", "catalog")["status"] == "completed"
     assert all("THIS CREATIVE PROMPT" not in call["prompt"] for call in gateway.calls)
     assert all(call["phase"] == "scanner" and "images" not in call for call in gateway.calls)
+    gateway_call_count = len(gateway.calls)
+    with pytest.raises(AnalysisPipelineUnavailableError, match="Phase 6"):
+        workflow.resume_project("project-1")
+    resumed = persistence.load_project("project-1")
+    assert resumed["status"] == ProjectStatus.CATALOG_READY.value
+    assert resumed["catalog"]["reused"] is True
+    assert len(gateway.calls) == gateway_call_count
