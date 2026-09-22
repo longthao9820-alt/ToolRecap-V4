@@ -29,6 +29,8 @@ from pathlib import Path
 import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
+from toolrecap_v4.analysis.cache import AnalysisCacheManager
+from toolrecap_v4.analysis.source_prep.pipeline import SourcePreparationPipeline
 from toolrecap_v4.cancellation import CancellationToken
 from toolrecap_v4.discovery import (
     SUPPORTED_EXTENSIONS,
@@ -46,6 +48,7 @@ from toolrecap_v4.errors import (
     PersistenceError,
     SourceChangedError,
     SourceNotFoundError,
+    ToolRecapError,
     ValidationError,
     WindowsCollisionError,
     WindowsNameError,
@@ -72,6 +75,7 @@ class ProjectStatus(str, enum.Enum):
     ANALYZING = "analyzing"
     ANALYZED = "analyzed"
     JSON_READY = "json_ready"
+    PREPARED = "prepared"
     RENDERING = "rendering"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -109,6 +113,8 @@ class WorkflowCallbacks:
     on_output_failed: Optional[Callable[[str, str], None]] = None
     on_output_skipped: Optional[Callable[[str, Dict[str, Any]], None]] = None
     on_error: Optional[Callable[[Exception, Optional[str]], None]] = None
+    on_source_preparation_progress: Optional[Callable[..., None]] = None
+    on_episode_prepared: Optional[Callable[[str, Dict[str, Any]], None]] = None
 
 
 def resolve_sources(
@@ -300,6 +306,8 @@ def reconcile_project_state(
     if status == ProjectStatus.ANALYZING.value:
         if persistence.has_final_json(project_id) or project_state.get("final_json"):
             project_state["status"] = ProjectStatus.ANALYZED.value
+        elif persistence.has_prepared_manifest(project_id):
+            project_state["status"] = ProjectStatus.PREPARED.value
         else:
             project_state["status"] = ProjectStatus.CREATED.value
         persistence.save_project(project_state)
@@ -320,11 +328,13 @@ class ProjectWorkflow:
         voice_adapter: Optional[VoiceStudioAdapter] = None,
         settings_manager: Optional[SettingsManager] = None,
         storage_root: Optional[Path | str] = None,
+        source_preparation_pipeline: Optional[SourcePreparationPipeline] = None,
     ) -> None:
         self.persistence = persistence or ProjectPersistence(storage_root=storage_root)
         self.settings_manager = settings_manager or SettingsManager(persistence=self.persistence)
         self.gateway_client = gateway_client or GatewayClient()
         self.voice_adapter = voice_adapter
+        self.source_preparation_pipeline = source_preparation_pipeline
 
     def create_project(
         self,
@@ -388,6 +398,7 @@ class ProjectWorkflow:
             "sub_analysis": None,
             "raw_response": None,
             "final_json": None,
+            "prepared_episodes": {},
             "outputs": {},
             "error": None,
         }
@@ -473,6 +484,7 @@ class ProjectWorkflow:
             "sub_analysis": None,
             "raw_response": None,
             "final_json": final_json,
+            "prepared_episodes": {},
             "outputs": {},
             "error": None,
         }
@@ -488,6 +500,7 @@ class ProjectWorkflow:
         settings: Optional[AppSettings] = None,
         cancellation_token: Optional[CancellationToken] = None,
         callbacks: Optional[WorkflowCallbacks] = None,
+        source_preparation_pipeline: Optional[SourcePreparationPipeline] = None,
     ) -> Dict[str, Any]:
         """Start or run project workflow synchronously."""
         return self._execute_workflow(
@@ -496,6 +509,7 @@ class ProjectWorkflow:
             settings=settings,
             cancellation_token=cancellation_token,
             callbacks=callbacks,
+            source_preparation_pipeline=source_preparation_pipeline,
         )
 
     def resume_project(
@@ -505,6 +519,7 @@ class ProjectWorkflow:
         settings: Optional[AppSettings] = None,
         cancellation_token: Optional[CancellationToken] = None,
         callbacks: Optional[WorkflowCallbacks] = None,
+        source_preparation_pipeline: Optional[SourcePreparationPipeline] = None,
     ) -> Dict[str, Any]:
         """Resume project workflow, skipping completed outputs whose fingerprints match."""
         return self._execute_workflow(
@@ -513,6 +528,7 @@ class ProjectWorkflow:
             settings=settings,
             cancellation_token=cancellation_token,
             callbacks=callbacks,
+            source_preparation_pipeline=source_preparation_pipeline,
         )
 
     def retry_project(
@@ -522,6 +538,7 @@ class ProjectWorkflow:
         settings: Optional[AppSettings] = None,
         cancellation_token: Optional[CancellationToken] = None,
         callbacks: Optional[WorkflowCallbacks] = None,
+        source_preparation_pipeline: Optional[SourcePreparationPipeline] = None,
     ) -> Dict[str, Any]:
         """Retry failed outputs or rerender invalidated outputs."""
         return self._execute_workflow(
@@ -530,6 +547,7 @@ class ProjectWorkflow:
             settings=settings,
             cancellation_token=cancellation_token,
             callbacks=callbacks,
+            source_preparation_pipeline=source_preparation_pipeline,
         )
 
     def get_project(self, project_id: str) -> Dict[str, Any]:
@@ -550,6 +568,7 @@ class ProjectWorkflow:
         settings: Optional[AppSettings] = None,
         cancellation_token: Optional[CancellationToken] = None,
         callbacks: Optional[WorkflowCallbacks] = None,
+        source_preparation_pipeline: Optional[SourcePreparationPipeline] = None,
     ) -> Dict[str, Any]:
         """Synchronous execution engine for create/start/resume/retry."""
         validate_windows_name(project_id, "project_id")
@@ -564,26 +583,161 @@ class ProjectWorkflow:
             final_json = self.persistence.load_final_json(project_id)
             state["final_json"] = final_json
 
-        if final_json is None:
-            if cancellation_token:
-                cancellation_token.check_cancelled()
-            err = AnalysisPipelineUnavailableError(
-                "Analysis pipeline is unavailable in Phase 2: whole-video analysis APIs have been removed "
-                "and replacement multimodal analysis pipeline is not configured."
-            )
-            now_iso = datetime.now(timezone.utc).isoformat()
-            state["status"] = ProjectStatus.FAILED.value
-            state["error"] = str(err)
-            state.setdefault("timestamps", {})["failed_at"] = now_iso
-            state["timestamps"]["updated_at"] = now_iso
-            self.persistence.save_project(state)
-            if callbacks and callbacks.on_status_change:
-                callbacks.on_status_change(ProjectStatus.FAILED.value)
-            if callbacks and callbacks.on_error:
-                callbacks.on_error(err, None)
-            raise err
-
         try:
+            # If no Final JSON: verify sources, run sequential source prep, controlled stop before Scanner
+            if final_json is None:
+                if cancellation_token:
+                    cancellation_token.check_cancelled()
+
+                # Source integrity check BEFORE any preparation (source mutation fails before prep)
+                verify_source_integrity(state["source_fingerprints"], cancellation_token=cancellation_token)
+
+                state["status"] = ProjectStatus.ANALYZING.value
+                now_iso = datetime.now(timezone.utc).isoformat()
+                state.setdefault("timestamps", {})["analyzing_started_at"] = now_iso
+                state["timestamps"]["updated_at"] = now_iso
+                self.persistence.save_project(state)
+                if callbacks and callbacks.on_status_change:
+                    callbacks.on_status_change(ProjectStatus.ANALYZING.value)
+
+                # Resolve ordered sources with deterministic E01...En mapping
+                if state.get("sources"):
+                    ordered_sources = state["sources"]
+                else:
+                    fps_list = list(state.get("source_fingerprints", {}).values())
+                    fps_list.sort(key=lambda x: natural_sort_key(x.get("basename", "")))
+                    ordered_sources = [{"source_file": f.get("basename"), "fingerprint": f} for f in fps_list]
+
+                prep_pipeline = (
+                    source_preparation_pipeline
+                    or self.source_preparation_pipeline
+                    or SourcePreparationPipeline(cache_manager=AnalysisCacheManager(cache_dir=self.persistence.root / "cache" / "analysis"))
+                )
+
+                prep_episodes: Dict[str, Any] = state.setdefault("prepared_episodes", {})
+
+                for i, src_entry in enumerate(ordered_sources, start=1):
+                    if cancellation_token:
+                        cancellation_token.check_cancelled()
+
+                    episode_id = f"E{i:02d}"
+                    src_fp = src_entry.get("fingerprint", {})
+                    src_file = src_entry.get("source_file") or (src_fp.get("basename") if isinstance(src_fp, dict) else "")
+                    src_map_entry = state["source_fingerprints"].get(src_file, {})
+                    src_path = (
+                        src_fp.get("path")
+                        if isinstance(src_fp, dict) and src_fp.get("path")
+                        else src_map_entry.get("path")
+                    )
+                    src_sha = (
+                        src_fp.get("sha256")
+                        if isinstance(src_fp, dict) and src_fp.get("sha256")
+                        else src_map_entry.get("sha256")
+                    )
+
+                    def _progress_cb(phase: str, pct: float, msg: str) -> None:
+                        if callbacks and callbacks.on_source_preparation_progress:
+                            callbacks.on_source_preparation_progress(episode_id, phase, pct, msg)
+
+                    try:
+                        prepared_ep = prep_pipeline.prepare_episode(
+                            source_path=src_path,
+                            episode_id=episode_id,
+                            source_id=episode_id,
+                            source_fingerprint=src_sha,
+                            force_refresh=False,
+                            on_progress=_progress_cb,
+                            cancellation_token=cancellation_token,
+                        )
+                    except CancelledError:
+                        raise
+                    except Exception as e:
+                        state["status"] = ProjectStatus.FAILED.value
+                        state["error"] = f"Source preparation failed for {episode_id}: {e}"
+                        now_err = datetime.now(timezone.utc).isoformat()
+                        state.setdefault("timestamps", {})["failed_at"] = now_err
+                        state["timestamps"]["updated_at"] = now_err
+                        self.persistence.save_project(state)
+                        if callbacks and callbacks.on_status_change:
+                            callbacks.on_status_change(ProjectStatus.FAILED.value)
+                        if callbacks and callbacks.on_error:
+                            callbacks.on_error(e, None)
+                        raise
+
+                    if prepared_ep.status == "failed":
+                        err = ToolRecapError(f"Episode {episode_id} source preparation produced failed status")
+                        state["status"] = ProjectStatus.FAILED.value
+                        state["error"] = str(err)
+                        now_err = datetime.now(timezone.utc).isoformat()
+                        state.setdefault("timestamps", {})["failed_at"] = now_err
+                        state["timestamps"]["updated_at"] = now_err
+                        self.persistence.save_project(state)
+                        if callbacks and callbacks.on_status_change:
+                            callbacks.on_status_change(ProjectStatus.FAILED.value)
+                        if callbacks and callbacks.on_error:
+                            callbacks.on_error(err, None)
+                        raise err
+
+                    has_aud = False
+                    if prepared_ep.audio_selection:
+                        has_aud = prepared_ep.audio_selection.has_audio
+                    elif prepared_ep.audio_info:
+                        has_aud = True
+
+                    ep_summary = {
+                        "episode_id": episode_id,
+                        "source_file": src_file or Path(src_path).name,
+                        "source_fingerprint": src_sha,
+                        "duration_ms": prepared_ep.duration_ms,
+                        "status": prepared_ep.status,
+                        "transcript_method": prepared_ep.transcript_method,
+                        "artifact_hash": prepared_ep.artifact_hash,
+                        "cues_count": prepared_ep.transcript.cue_count,
+                        "canvas_width": prepared_ep.canvas_width,
+                        "canvas_height": prepared_ep.canvas_height,
+                        "has_audio": has_aud,
+                        "prepared_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    # Persist full local PreparedEpisode/Transcript; project state keeps a lightweight summary.
+                    self.persistence.save_prepared_episode(project_id, episode_id, prepared_ep.to_dict())
+                    prep_episodes[episode_id] = ep_summary
+                    state["timestamps"]["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    self.persistence.save_project(state)
+
+                    if callbacks and callbacks.on_episode_prepared:
+                        callbacks.on_episode_prepared(episode_id, ep_summary)
+
+                # All episodes successfully prepared -> persist manifest and checkpoint
+                manifest_data = {
+                    "project_id": project_id,
+                    "status": "completed",
+                    "episodes": list(prep_episodes.values()),
+                    "total_episodes": len(ordered_sources),
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }
+                self.persistence.save_prepared_manifest(project_id, manifest_data)
+                self.persistence.save_checkpoint(project_id, "source_preparation", {
+                    "status": "completed",
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "episodes": [ep["episode_id"] for ep in prep_episodes.values()],
+                })
+
+                # Controlled stop before Scanner: status PREPARED
+                scanner_msg = "Analysis pipeline stopped: source preparation complete (PREPARED); multimodal Scanner is unavailable."
+                now_prep = datetime.now(timezone.utc).isoformat()
+                state["status"] = ProjectStatus.PREPARED.value
+                state["error"] = scanner_msg
+                state.setdefault("timestamps", {})["prepared_at"] = now_prep
+                state["timestamps"]["updated_at"] = now_prep
+                self.persistence.save_project(state)
+                if callbacks and callbacks.on_status_change:
+                    callbacks.on_status_change(ProjectStatus.PREPARED.value)
+
+                scanner_err = AnalysisPipelineUnavailableError(scanner_msg)
+                if callbacks and callbacks.on_error:
+                    callbacks.on_error(scanner_err, None)
+                raise scanner_err
+
             # Step 2: Source integrity check (source changes fail no substitution)
             verify_source_integrity(state["source_fingerprints"], cancellation_token=cancellation_token)
 

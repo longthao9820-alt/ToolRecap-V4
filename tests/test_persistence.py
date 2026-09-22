@@ -140,3 +140,55 @@ def test_nested_secrets_rejected_before_persistence(tmp_path: Path) -> None:
 
     with pytest.raises(SecretExposureError, match="Forbidden secret key detected"):
         persistence.save_checkpoint("proj-01", "ckpt-secret", checkpoint_data)
+
+
+def test_prepared_artifacts_persistence_roundtrip(tmp_path: Path) -> None:
+    """Verify prepared episode metadata and manifest persistence roundtrip."""
+    persistence = ProjectPersistence(storage_root=tmp_path)
+    project_id = "proj-prep-01"
+
+    ep1_data = {
+        "episode_id": "E01",
+        "source_file": "ep01.mp4",
+        "duration_ms": 5000,
+        "status": "ready",
+        "transcript_method": "sidecar",
+    }
+    ep2_data = {
+        "episode_id": "E02",
+        "source_file": "ep02.mp4",
+        "duration_ms": 6000,
+        "status": "ready",
+        "transcript_method": "stt",
+    }
+
+    assert not persistence.has_prepared_episode(project_id, "E01")
+    path1 = persistence.save_prepared_episode(project_id, "E01", ep1_data)
+    assert path1.exists()
+    assert persistence.has_prepared_episode(project_id, "E01")
+    loaded1 = persistence.load_prepared_episode(project_id, "E01")
+    assert loaded1 == ep1_data
+
+    persistence.save_prepared_episode(project_id, "E02", ep2_data)
+    all_eps = persistence.list_prepared_episodes(project_id)
+    assert len(all_eps) == 2
+    assert [e["episode_id"] for e in all_eps] == ["E01", "E02"]
+
+    assert not persistence.has_prepared_manifest(project_id)
+    manifest = {
+        "project_id": project_id,
+        "status": "completed",
+        "episodes": all_eps,
+        "total_episodes": 2,
+    }
+    m_path = persistence.save_prepared_manifest(project_id, manifest)
+    assert m_path.exists()
+    assert persistence.has_prepared_manifest(project_id)
+    loaded_m = persistence.load_prepared_manifest(project_id)
+    assert loaded_m == manifest
+
+    # Secrets rejected in prepared artifacts
+    with pytest.raises(SecretExposureError, match="Forbidden secret key detected"):
+        persistence.save_prepared_episode(project_id, "E03", {"api_key": "secret"})
+    with pytest.raises(SecretExposureError, match="Forbidden secret key detected"):
+        persistence.save_prepared_manifest(project_id, {"auth_token": "secret"})

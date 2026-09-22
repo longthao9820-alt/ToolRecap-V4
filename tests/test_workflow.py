@@ -100,10 +100,13 @@ def test_storage(tmp_path: Path) -> ProjectPersistence:
 
 @pytest.fixture
 def sample_video(tmp_path: Path) -> Path:
-    """Create a single synthetic video."""
+    """Create a single synthetic video with sidecar English subtitles."""
     v_path = tmp_path / "sources" / "ep01.mp4"
     v_path.parent.mkdir(parents=True, exist_ok=True)
-    return _create_synthetic_video(v_path, duration=2.0)
+    _create_synthetic_video(v_path, duration=2.0)
+    srt_path = tmp_path / "sources" / "ep01.en.srt"
+    srt_path.write_text("1\n00:00:00,100 --> 00:00:01,800\nSample episode dialogue line\n", encoding="utf-8")
+    return v_path
 
 
 def test_single_file_and_folder_discovery(tmp_path: Path):
@@ -174,7 +177,7 @@ def test_mock_oneclick_sequence_final_saved_first(test_storage: ProjectPersisten
     )
     assert state["status"] == ProjectStatus.CREATED.value
 
-    with pytest.raises(AnalysisPipelineUnavailableError, match="unavailable in Phase 2"):
+    with pytest.raises(AnalysisPipelineUnavailableError, match="Scanner is unavailable"):
         workflow.start_project(project_id)
 
     # Invariants: 0 Gateway calls
@@ -186,11 +189,11 @@ def test_mock_oneclick_sequence_final_saved_first(test_storage: ProjectPersisten
     assert test_storage.has_raw_response(project_id) is False
     assert test_storage.has_final_json(project_id) is False
 
-    # Invariant: state is FAILED with error and failed_at persisted
-    failed_state = test_storage.load_project(project_id)
-    assert failed_state["status"] == ProjectStatus.FAILED.value
-    assert "Analysis pipeline is unavailable" in failed_state["error"]
-    assert "failed_at" in failed_state["timestamps"]
+    # Invariant: state is PREPARED with Scanner error and prepared_at persisted
+    prep_state = test_storage.load_project(project_id)
+    assert prep_state["status"] == ProjectStatus.PREPARED.value
+    assert "Scanner" in prep_state["error"]
+    assert "prepared_at" in prep_state["timestamps"]
 
 
 def test_import_zero_ai(test_storage: ProjectPersistence, sample_video: Path, tmp_path: Path):
@@ -603,14 +606,14 @@ def test_analysis_required_fails_before_gateway(test_storage: ProjectPersistence
     # Zero Gateway calls made
     assert mock_gw.submit_text_chat.call_count == 0
 
-    # Invariant: state records failed status and error
+    # Invariant: state records prepared status and error
     state = test_storage.load_project(project_id)
-    assert state["status"] == ProjectStatus.FAILED.value
-    assert "Analysis pipeline is unavailable" in state["error"]
-    assert "failed_at" in state["timestamps"]
+    assert state["status"] == ProjectStatus.PREPARED.value
+    assert "Scanner" in state["error"]
+    assert "prepared_at" in state["timestamps"]
 
-    # Callbacks received failure
-    assert ProjectStatus.FAILED.value in status_events
+    # Callbacks received prepared
+    assert ProjectStatus.PREPARED.value in status_events
     assert len(error_events) == 1
     assert isinstance(error_events[0][0], AnalysisPipelineUnavailableError)
 
@@ -736,6 +739,27 @@ def test_reconcile_interrupted_states(test_storage: ProjectPersistence):
     state1["status"] = ProjectStatus.RENDERING.value
     reconciled3 = reconcile_project_state(state1, test_storage)
     assert reconciled3["status"] == ProjectStatus.ANALYZED.value
+
+    # Case 4: Interrupted in ANALYZING with prepared manifest -> PREPARED
+    p_id2 = "proj-reconcile-02"
+    test_storage.save_prepared_manifest(p_id2, {"project_id": p_id2, "status": "completed"})
+    state2 = {
+        "schema_version": "3.0",
+        "project_id": p_id2,
+        "project_name": "Reconcile_Test2",
+        "status": ProjectStatus.ANALYZING.value,
+        "sources": [],
+        "source_fingerprints": {},
+        "outputs": {},
+    }
+    test_storage.save_project(state2)
+    reconciled4 = reconcile_project_state(state2, test_storage)
+    assert reconciled4["status"] == ProjectStatus.PREPARED.value
+
+    # Case 5: Already PREPARED is preserved
+    state2["status"] = ProjectStatus.PREPARED.value
+    reconciled5 = reconcile_project_state(state2, test_storage)
+    assert reconciled5["status"] == ProjectStatus.PREPARED.value
 
 
 def test_validate_completed_output_presence_and_hash_before_skip(
@@ -987,7 +1011,8 @@ def test_resume_without_final_json_fails_analysis_unavailable(test_storage: Proj
 
     assert mock_gw.submit_text_chat.call_count == 0
     state = test_storage.load_project(project_id)
-    assert state["status"] == ProjectStatus.FAILED.value
+    assert state["status"] == ProjectStatus.PREPARED.value
+    assert "prepared_at" in state["timestamps"]
 
 
 def test_dual_stage_render_retry_zero_ai(test_storage: ProjectPersistence, sample_video: Path, tmp_path: Path):

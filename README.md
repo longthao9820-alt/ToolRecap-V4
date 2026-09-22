@@ -1,20 +1,25 @@
-# Hướng dẫn sử dụng ToolRecap V4 (Phase 2 Safe Gateway & Transport Boundary)
+# Hướng dẫn sử dụng ToolRecap V4 (Phase 3 Source Preparation Pipeline)
 
 ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tóm tắt và dựng video recap từ video nguồn.
 
 ---
 
-## 1. Trạng thái hiện tại: Phase 2 Safe Gateway & Transport Boundary
+## 1. Trạng thái hiện tại: Phase 3 Source Preparation Pipeline
 
 > **LƯU Ý TRUNG THỰC VỀ TIẾN ĐỘ & BẢN DỰNG:**
-> Hiện tại dự án đã hoàn thành **Phase 2 (Safe Gateway & Transport Boundary)**:
-> - **Đã loại bỏ hoàn toàn API gửi whole-video**: Toàn bộ các API truyền tệp video nguyên bản (`StreamingChatPayload`, `submit_chat_analysis`, `validate_model_video_capability`, `DEFAULT_MAX_FILE_SIZE_BYTES`, `SUPPORTED_VIDEO_EXTENSIONS`) đã bị xóa khỏi production code.
-> - **AI Gateway an toàn, trung lập nhà cung cấp**: Chỉ hỗ trợ văn bản/JSON và ảnh tĩnh đã được kiểm định (`validate_and_reencode_image`, `submit_text_chat`, `submit_image_chat`), kiểm tra tính sẵn sàng model trung lập (`validate_model_availability`).
-> - **Phụ thuộc runtime**: Đã khai báo `Pillow>=10.0.0` trong `pyproject.toml` phục vụ kiểm tra và chuẩn hóa ảnh tĩnh.
+> Hiện tại dự án đã hoàn thành **Phase 3 (Source Preparation Pipeline & Subtitle/Audio Processing)**:
+> - **Hệ thống chuẩn bị nguồn cục bộ hoàn chỉnh**: Mô-đun `toolrecap_v4.analysis` xử lý trích xuất phụ đề, bóc tách âm thanh, nhận diện tiếng nói và lưu trữ tạo tác chuẩn bị có kiểm soát chất lượng.
+> - **Thứ tự ưu tiên trích xuất hội thoại nghiêm ngặt**:
+>   1. Phụ đề rời tiếng Anh (Sidecar text: SRT, VTT, ASS) với khả năng làm sạch thẻ định dạng.
+>   2. Phụ đề nhúng trong tệp video (Embedded text: SRT, ASS, SSA, VTT, MOV_TEXT).
+>   3. Phụ đề dạng ảnh bằng OCR cục bộ (Bitmap OCR: PGS `.sup`, VobSub `.sub`/`.idx` qua RapidOCR ONNX với cổng kiểm soát chất lượng chống rác/lặp ký tự).
+>   4. Nhận dạng giọng nói (Speech-to-Text: `faster-whisper` trên luồng âm thanh chính được chọn, phân đoạn cửa sổ có đo tín hiệu năng lượng, chống trùng lặp lề).
+> - **Lựa chọn luồng âm thanh thông minh**: Phân biệt rành mạch chỉ số luồng trong container (`global_index`) và thứ tự luồng âm thanh (`audio_ordinal`), tự động ưu tiên ngôn ngữ chính, lọc bỏ luồng bình luận/thuyết minh khi có luồng đối thoại chuẩn.
+> - **Bộ nhớ đệm & Lưu trữ chuẩn xác**: Định danh bộ nhớ đệm dựa trên băm nội dung tệp thực tế (`SHA-256`), không dựa riêng thời gian sửa đổi (mtime). Lưu tạo tác tập phim đã chuẩn bị vào `%LOCALAPPDATA%\ToolRecapV4\prepared\<mã_dự_án>\<tập>.json` và `manifest.json`.
 > - **Workflow kiểm soát chặt chẽ**:
->   - Khi dự án đã có Final JSON hợp lệ hoặc được import từ trước: chạy thẳng vào luồng dựng (render), thực hiện chính xác 0 lượt gọi Gateway.
->   - Khi cần phân tích video nhưng chưa có Final JSON: quy trình dừng ngay lập tức với ngoại lệ tường minh `AnalysisPipelineUnavailableError` trước khi đọc tệp nguồn, trước mọi lượt gọi Gateway, trước khi ghi checkpoint sub/raw, trước voice và trước render. Trạng thái dự án ghi nhận `FAILED`.
-> - **CHƯA CÓ CÁC TÍNH NĂNG PHASE 3+**: Scanner từng phần, Season Catalog, Season Planner, Vision Extraction, Output Writers độc lập và Output Directory resolver CHƯA được triển khai.
+>   - Khi dự án đã có Final JSON hợp lệ hoặc được import từ trước: chạy thẳng vào luồng dựng (render), thực hiện chính xác 0 lượt gọi Gateway và 0 lượt chạy chuẩn bị nguồn.
+>   - Khi chưa có Final JSON: quy trình thực hiện kiểm tra tính toàn vẹn nguồn, chạy chuẩn bị nguồn tuần tự từng tập (`E01`, `E02`, ...), tạo transcript và lưu manifest chuẩn bị, chuyển trạng thái dự án sang `PREPARED`, sau đó dừng có kiểm soát tại ranh giới Phase 3 với ngoại lệ `AnalysisPipelineUnavailableError` (do Scanner đa phương thái chưa triển khai).
+> - **CHƯA CÓ CÁC TÍNH NĂNG PHASE 4+**: Multimodal Scanner, Season Catalog, Season Planner, Output Writers độc lập và Output Directory resolver CHƯA được triển khai (thuộc các giai đoạn tiếp theo).
 > - **CHƯA CÓ BẢN DỰNG EXE**: Chưa chạy đóng gói `build_portable.py` / PyInstaller; chưa có tệp `ToolRecapV4.exe` trong `dist/` hoặc bản nén trong `release/`.
 > - **MỤC TIÊU CẬP NHẬT CHƯA XÁC MINH PHÁT HÀNH**: Cấu hình kho cập nhật đích `longthao9820-alt/ToolRecap-V4` là định danh cấu hình, chưa có bản release thực tế trên remote.
 
@@ -39,7 +44,7 @@ ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tó
 
 1. **AI Gateway (9router):**
    - Địa chỉ mặc định: `http://127.0.0.1:20128`.
-   - Sub model (phân tích) và Prime model (tổng hợp kịch bản).
+   - Scanner model và Finalizer model (nhập ID model tự do, provider-neutral).
    - Nhập API key trong **Cài đặt -> 1. AI Gateway**.
 
 2. **VoiceStudio (Tạo giọng đọc):**
@@ -64,6 +69,8 @@ ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tó
 ## 5. Dữ liệu lưu ở đâu?
 
 Tất cả dữ liệu làm việc, cấu hình và tệp tạm được lưu riêng biệt trong thư mục `%LOCALAPPDATA%\ToolRecapV4\`:
+- `prepared/`: Dữ liệu tập phim đã chuẩn bị và manifest (`prepared/<mã_dự_án>/<tập>.json`, `manifest.json`).
+- `cache/analysis/`: Bộ nhớ đệm phân tích và trích xuất phụ đề/âm thanh content-addressable.
 - `sub_analysis/`: Checkpoint phân tích (`sub_analysis/<mã_dự_án>.txt`).
 - `final/`: Kịch bản Final JSON (`final/<mã_dự_án>.json`).
 - `raw/`: Phản hồi thô từ AI Gateway (`raw/<mã_dự_án>.txt`).

@@ -93,6 +93,7 @@ class ProjectPersistence:
         self.raw_dir = self.root / "raw"
         self.sub_dir = self.root / "sub_analysis"
         self.final_dir = self.root / "final"
+        self.prepared_dir = self.root / "prepared"
 
         self.projects_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
@@ -100,6 +101,7 @@ class ProjectPersistence:
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.sub_dir.mkdir(parents=True, exist_ok=True)
         self.final_dir.mkdir(parents=True, exist_ok=True)
+        self.prepared_dir.mkdir(parents=True, exist_ok=True)
 
     def _project_path(self, project_id: str) -> Path:
         validate_windows_name(project_id, "project_id")
@@ -254,6 +256,68 @@ class ProjectPersistence:
     def has_final_json(self, project_id: str) -> bool:
         """Check if final JSON exists on disk."""
         return self._final_path(project_id).exists()
+
+    def _prepared_dir(self, project_id: str) -> Path:
+        validate_windows_name(project_id, "project_id")
+        d = self.prepared_dir / project_id
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _prepared_episode_path(self, project_id: str, episode_id: str) -> Path:
+        validate_windows_name(episode_id, "episode_id")
+        return self._prepared_dir(project_id) / f"{episode_id}.json"
+
+    def _prepared_manifest_path(self, project_id: str) -> Path:
+        return self._prepared_dir(project_id) / "manifest.json"
+
+    def save_prepared_episode(
+        self, project_id: str, episode_id: str, prepared_data: Dict[str, Any]
+    ) -> Path:
+        """Save prepared episode artifact metadata atomically in LOCALAPPDATA."""
+        target = self._prepared_episode_path(project_id, episode_id)
+        atomic_write_json(target, prepared_data)
+        return target
+
+    def load_prepared_episode(self, project_id: str, episode_id: str) -> Dict[str, Any]:
+        """Load prepared episode artifact metadata from LOCALAPPDATA."""
+        target = self._prepared_episode_path(project_id, episode_id)
+        return read_json(target)
+
+    def has_prepared_episode(self, project_id: str, episode_id: str) -> bool:
+        """Check if prepared episode exists on disk."""
+        target = self._prepared_episode_path(project_id, episode_id)
+        return target.exists()
+
+    def list_prepared_episodes(self, project_id: str) -> List[Dict[str, Any]]:
+        """List all prepared episodes for a project."""
+        p_dir = self._prepared_dir(project_id)
+        if not p_dir.exists():
+            return []
+        eps: List[Dict[str, Any]] = []
+        for p in sorted(p_dir.glob("E*.json")):
+            try:
+                eps.append(read_json(p))
+            except Exception:
+                continue
+        return eps
+
+    def save_prepared_manifest(
+        self, project_id: str, manifest_data: Dict[str, Any]
+    ) -> Path:
+        """Save project source preparation manifest atomically in LOCALAPPDATA."""
+        target = self._prepared_manifest_path(project_id)
+        atomic_write_json(target, manifest_data)
+        return target
+
+    def load_prepared_manifest(self, project_id: str) -> Dict[str, Any]:
+        """Load project source preparation manifest from LOCALAPPDATA."""
+        target = self._prepared_manifest_path(project_id)
+        return read_json(target)
+
+    def has_prepared_manifest(self, project_id: str) -> bool:
+        """Check if project source preparation manifest exists on disk."""
+        target = self._prepared_manifest_path(project_id)
+        return target.exists()
 
     def list_projects(self) -> List[Dict[str, Any]]:
         """List all persisted projects, sorted with most recently updated first."""
