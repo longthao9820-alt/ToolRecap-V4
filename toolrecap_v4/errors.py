@@ -84,6 +84,61 @@ class AnalysisPipelineUnavailableError(ToolRecapError):
     """Raised when analysis is required but the analysis pipeline is unavailable in Phase 2."""
 
 
+class ScannerError(ToolRecapError):
+    """Base exception for factual transcript Scanner failures."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        episode_id: str | None = None,
+        chunk_id: str | None = None,
+        request_phase: str | None = None,
+        retry_count: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.episode_id = episode_id
+        self.chunk_id = chunk_id
+        self.request_phase = request_phase
+        self.retry_count = retry_count
+
+
+class ScannerChunkPlanningError(ScannerError):
+    """Raised when a transcript cannot be converted into valid Scanner chunks."""
+
+
+class ScannerCapacityError(ScannerChunkPlanningError):
+    """Raised when even a losslessly split transcript part cannot fit the request envelope."""
+
+
+class ScannerResponseError(ScannerError):
+    """Raised when a Scanner response cannot be parsed as structured JSON."""
+
+
+class ScannerValidationError(ScannerResponseError):
+    """Raised when structured Scanner output violates the factual contract."""
+
+    def __init__(self, message: str, *, issue_codes: tuple[str, ...] = (), **context: object) -> None:
+        super().__init__(message, **context)
+        self.issue_codes = issue_codes
+
+
+class ScannerRepairExhaustedError(ScannerError):
+    """Raised after bounded technical repair attempts fail for one Scanner chunk."""
+
+    def __init__(self, message: str, *, validation_errors: tuple[str, ...] = (), **context: object) -> None:
+        super().__init__(message, **context)
+        self.validation_errors = validation_errors
+
+
+class EvidenceStoreError(ToolRecapError):
+    """Raised when evidence persistence or integrity verification fails."""
+
+
+class EvidenceRevisionError(EvidenceStoreError):
+    """Raised for an unknown, incomplete, or dependency-mismatched evidence revision."""
+
+
 class CancelledError(ToolRecapError):
     """Raised when an operation is cancelled."""
 

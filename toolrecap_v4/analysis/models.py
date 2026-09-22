@@ -11,6 +11,101 @@ from toolrecap_v4.media import AudioStreamInfo, VideoStreamInfo
 
 
 @dataclass(frozen=True)
+class DialogueReference:
+    """Exact transcript-part provenance retained by an Evidence observation."""
+
+    cue_id: str
+    part_index: int
+    part_count: int
+    text: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DialogueReference:
+        return cls(
+            cue_id=str(data["cue_id"]),
+            part_index=int(data["part_index"]),
+            part_count=int(data["part_count"]),
+            text=str(data["text"]),
+        )
+
+
+@dataclass(frozen=True)
+class Evidence:
+    """Application-owned, factual evidence stored under one evidence revision."""
+
+    evidence_id: str
+    episode_id: str
+    source_id: str
+    start_ms: int
+    end_ms: int
+    category: str
+    observation: str
+    dialogue: tuple[DialogueReference, ...] = field(default_factory=tuple)
+    entities: tuple[str, ...] = field(default_factory=tuple)
+    modality: str = "subtitle"
+    confidence: float | None = None
+    uncertainty: tuple[str, ...] = field(default_factory=tuple)
+    visual_refs: tuple[str, ...] = field(default_factory=tuple)
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if type(self.start_ms) is bool or type(self.end_ms) is bool:
+            raise TypeError("Evidence timestamps cannot be boolean")
+        if not isinstance(self.start_ms, int) or not isinstance(self.end_ms, int):
+            raise TypeError("Evidence timestamps must be integers")
+        if self.start_ms < 0 or self.end_ms <= self.start_ms:
+            raise ValueError("Evidence requires 0 <= start_ms < end_ms")
+        for name in ("evidence_id", "episode_id", "source_id", "category", "observation", "modality"):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
+                raise ValueError(f"Evidence {name} must be a non-empty string")
+        if self.confidence is not None:
+            if isinstance(self.confidence, bool) or not isinstance(self.confidence, (int, float)):
+                raise TypeError("Evidence confidence must be numeric or null")
+            if not 0.0 <= float(self.confidence) <= 1.0:
+                raise ValueError("Evidence confidence must be between 0 and 1")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "evidence_id": self.evidence_id,
+            "episode_id": self.episode_id,
+            "source_id": self.source_id,
+            "start_ms": self.start_ms,
+            "end_ms": self.end_ms,
+            "category": self.category,
+            "observation": self.observation,
+            "dialogue": [item.to_dict() for item in self.dialogue],
+            "entities": list(self.entities),
+            "modality": self.modality,
+            "confidence": self.confidence,
+            "uncertainty": list(self.uncertainty),
+            "visual_refs": list(self.visual_refs),
+            "provenance": dict(self.provenance),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Evidence:
+        return cls(
+            evidence_id=str(data["evidence_id"]),
+            episode_id=str(data["episode_id"]),
+            source_id=str(data["source_id"]),
+            start_ms=data["start_ms"],
+            end_ms=data["end_ms"],
+            category=str(data["category"]),
+            observation=str(data["observation"]),
+            dialogue=tuple(DialogueReference.from_dict(item) for item in data.get("dialogue", [])),
+            entities=tuple(str(item) for item in data.get("entities", [])),
+            modality=str(data["modality"]),
+            confidence=data.get("confidence"),
+            uncertainty=tuple(str(item) for item in data.get("uncertainty", [])),
+            visual_refs=tuple(str(item) for item in data.get("visual_refs", [])),
+            provenance=dict(data.get("provenance", {})),
+        )
+
+
+@dataclass(frozen=True)
 class TranscriptCue:
     """Individual subtitle or transcript cue with strict millisecond boundaries."""
 

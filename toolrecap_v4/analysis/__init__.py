@@ -11,14 +11,26 @@ from .dependencies import (
     hash_file_content,
     is_signature_valid,
 )
-from .models import AudioSelection, PreparedEpisode, Transcript, TranscriptCue
+from .evidence_store import EvidenceCompleteness, EvidenceQueryResult, EvidenceStore
+from .models import AudioSelection, DialogueReference, Evidence, PreparedEpisode, Transcript, TranscriptCue
+from .scanner import ScannerChunkPolicy, ScannerConfig, ScannerProjectResult, ScannerService, compute_evidence_revision
 
 __all__ = [
     "AnalysisCacheManager",
     "AudioSelection",
+    "DialogueReference",
+    "Evidence",
+    "EvidenceCompleteness",
+    "EvidenceQueryResult",
+    "EvidenceStore",
     "PreparedEpisode",
     "Transcript",
     "TranscriptCue",
+    "ScannerChunkPolicy",
+    "ScannerConfig",
+    "ScannerProjectResult",
+    "ScannerService",
+    "compute_evidence_revision",
     "compute_embedded_track_signature",
     "compute_sidecar_signature",
     "compute_source_signature",

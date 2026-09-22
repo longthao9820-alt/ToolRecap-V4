@@ -60,6 +60,15 @@ class AppSettings:
     gateway_model: str = "sub"
     gateway_thinking: bool = False
 
+    # Phase 4 factual Scanner. Empty on a fresh install until explicitly configured.
+    # Existing V3/V4 settings are migrated from gateway_sub_* by from_dict().
+    scanner_model: str = ""
+    scanner_reasoning: str = ""
+    scanner_parallelism: int = 3
+    scanner_chunk_duration_ms: int = 300_000
+    scanner_max_request_bytes: int = 131_072
+    scanner_repair_attempts: int = 1
+
     # Notifications (all defaults ON)
     notify_complete: bool = True
     notify_error: bool = True
@@ -86,6 +95,14 @@ class AppSettings:
             self.gateway_model = self.gateway_sub_model
         elif self.gateway_model and not self.gateway_sub_model:
             self.gateway_sub_model = self.gateway_model
+        if self.scanner_parallelism < 1:
+            raise ValueError("scanner_parallelism must be at least 1")
+        if self.scanner_chunk_duration_ms < 1:
+            raise ValueError("scanner_chunk_duration_ms must be positive")
+        if self.scanner_max_request_bytes < 1024:
+            raise ValueError("scanner_max_request_bytes must be at least 1024")
+        if self.scanner_repair_attempts < 0:
+            raise ValueError("scanner_repair_attempts must be non-negative")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert settings to dictionary."""
@@ -95,6 +112,12 @@ class AppSettings:
     def from_dict(cls, data: Dict[str, Any]) -> AppSettings:
         """Create AppSettings from dict, safely migrating legacy gateway_model and thinking if needed."""
         data_copy = dict(data)
+        # Transitional Phase 3 names become provider-neutral Scanner configuration.
+        # Preserve the literal user-selected ID; never infer a provider from it.
+        if "scanner_model" not in data_copy:
+            data_copy["scanner_model"] = str(data_copy.get("gateway_sub_model") or data_copy.get("gateway_model") or "")
+        if "scanner_reasoning" not in data_copy:
+            data_copy["scanner_reasoning"] = str(data_copy.get("gateway_sub_reasoning") or "")
         # Migrate legacy single gateway_model to dual sub/prime defaults
         if "gateway_model" in data_copy and "gateway_sub_model" not in data_copy:
             old_model = data_copy.get("gateway_model")

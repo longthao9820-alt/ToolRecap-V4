@@ -99,3 +99,17 @@ def test_settings_persistence_roundtrip(tmp_path: Path):
     assert loaded_s.gateway_sub_reasoning == "high"
     assert loaded_s.gateway_prime_model == "custom-prime-model"
     assert loaded_s.gateway_prime_reasoning == "low"
+
+
+def test_legacy_scanner_settings_migrate_provider_neutrally():
+    settings = AppSettings.from_dict({
+        "gateway_sub_model": "literal-custom-route",
+        "gateway_sub_reasoning": "medium",
+    })
+    assert settings.scanner_model == "literal-custom-route"
+    assert settings.scanner_reasoning == "medium"
+
+
+def test_fresh_scanner_model_is_not_vendor_hardcoded():
+    settings = AppSettings()
+    assert settings.scanner_model == ""

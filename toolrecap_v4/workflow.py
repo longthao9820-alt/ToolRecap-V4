@@ -30,6 +30,8 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from toolrecap_v4.analysis.cache import AnalysisCacheManager
+from toolrecap_v4.analysis.models import PreparedEpisode
+from toolrecap_v4.analysis.scanner import ScannerChunkPolicy, ScannerConfig, ScannerService
 from toolrecap_v4.analysis.source_prep.pipeline import SourcePreparationPipeline
 from toolrecap_v4.cancellation import CancellationToken
 from toolrecap_v4.discovery import (
@@ -76,6 +78,7 @@ class ProjectStatus(str, enum.Enum):
     ANALYZED = "analyzed"
     JSON_READY = "json_ready"
     PREPARED = "prepared"
+    EVIDENCE_READY = "evidence_ready"
     RENDERING = "rendering"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -115,6 +118,7 @@ class WorkflowCallbacks:
     on_error: Optional[Callable[[Exception, Optional[str]], None]] = None
     on_source_preparation_progress: Optional[Callable[..., None]] = None
     on_episode_prepared: Optional[Callable[[str, Dict[str, Any]], None]] = None
+    on_evidence_ready: Optional[Callable[[str, Dict[str, int]], None]] = None
 
 
 def resolve_sources(
@@ -306,10 +310,17 @@ def reconcile_project_state(
     if status == ProjectStatus.ANALYZING.value:
         if persistence.has_final_json(project_id) or project_state.get("final_json"):
             project_state["status"] = ProjectStatus.ANALYZED.value
-        elif persistence.has_prepared_manifest(project_id):
-            project_state["status"] = ProjectStatus.PREPARED.value
         else:
-            project_state["status"] = ProjectStatus.CREATED.value
+            try:
+                evidence_checkpoint = persistence.load_checkpoint(project_id, "evidence")
+            except PersistenceError:
+                evidence_checkpoint = None
+            if evidence_checkpoint and evidence_checkpoint.get("status") == "completed":
+                project_state["status"] = ProjectStatus.EVIDENCE_READY.value
+            elif persistence.has_prepared_manifest(project_id):
+                project_state["status"] = ProjectStatus.PREPARED.value
+            else:
+                project_state["status"] = ProjectStatus.CREATED.value
         persistence.save_project(project_state)
     elif status == ProjectStatus.RENDERING.value:
         project_state["status"] = ProjectStatus.ANALYZED.value
@@ -329,12 +340,14 @@ class ProjectWorkflow:
         settings_manager: Optional[SettingsManager] = None,
         storage_root: Optional[Path | str] = None,
         source_preparation_pipeline: Optional[SourcePreparationPipeline] = None,
+        scanner_service: Optional[ScannerService] = None,
     ) -> None:
         self.persistence = persistence or ProjectPersistence(storage_root=storage_root)
         self.settings_manager = settings_manager or SettingsManager(persistence=self.persistence)
         self.gateway_client = gateway_client or GatewayClient()
         self.voice_adapter = voice_adapter
         self.source_preparation_pipeline = source_preparation_pipeline
+        self.scanner_service = scanner_service
 
     def create_project(
         self,
@@ -586,6 +599,7 @@ class ProjectWorkflow:
         try:
             # If no Final JSON: verify sources, run sequential source prep, controlled stop before Scanner
             if final_json is None:
+                cfg = settings or AppSettings.from_dict(state.get("settings_snapshot", {}))
                 if cancellation_token:
                     cancellation_token.check_cancelled()
 
@@ -722,21 +736,90 @@ class ProjectWorkflow:
                     "episodes": [ep["episode_id"] for ep in prep_episodes.values()],
                 })
 
-                # Controlled stop before Scanner: status PREPARED
-                scanner_msg = "Analysis pipeline stopped: source preparation complete (PREPARED); multimodal Scanner is unavailable."
-                now_prep = datetime.now(timezone.utc).isoformat()
-                state["status"] = ProjectStatus.PREPARED.value
-                state["error"] = scanner_msg
-                state.setdefault("timestamps", {})["prepared_at"] = now_prep
-                state["timestamps"]["updated_at"] = now_prep
-                self.persistence.save_project(state)
-                if callbacks and callbacks.on_status_change:
-                    callbacks.on_status_change(ProjectStatus.PREPARED.value)
+                # A fresh install requires an explicit provider-neutral Scanner model.
+                scanner = self.scanner_service
+                if scanner is None and cfg.scanner_model.strip():
+                    scanner = ScannerService(
+                        gateway_client=self.gateway_client,
+                        storage_root=self.persistence.root,
+                        config=ScannerConfig(
+                            model=cfg.scanner_model,
+                            reasoning=cfg.scanner_reasoning,
+                            parallelism=cfg.scanner_parallelism,
+                            chunk_policy=ScannerChunkPolicy(
+                                max_duration_ms=cfg.scanner_chunk_duration_ms,
+                                max_request_bytes=cfg.scanner_max_request_bytes,
+                            ),
+                            repair_attempts=cfg.scanner_repair_attempts,
+                        ),
+                    )
 
-                scanner_err = AnalysisPipelineUnavailableError(scanner_msg)
+                if scanner is None:
+                    scanner_msg = "Analysis pipeline stopped: source preparation complete (PREPARED); Scanner is unavailable until a Scanner model is configured."
+                    now_prep = datetime.now(timezone.utc).isoformat()
+                    state["status"] = ProjectStatus.PREPARED.value
+                    state["error"] = scanner_msg
+                    state.setdefault("timestamps", {})["prepared_at"] = now_prep
+                    state["timestamps"]["updated_at"] = now_prep
+                    self.persistence.save_project(state)
+                    if callbacks and callbacks.on_status_change:
+                        callbacks.on_status_change(ProjectStatus.PREPARED.value)
+                    scanner_err = AnalysisPipelineUnavailableError(scanner_msg)
+                    if callbacks and callbacks.on_error:
+                        callbacks.on_error(scanner_err, None)
+                    raise scanner_err
+
+                prepared_models = [
+                    PreparedEpisode.from_dict(self.persistence.load_prepared_episode(project_id, episode_id))
+                    for episode_id in sorted(prep_episodes)
+                ]
+                try:
+                    evidence_result = scanner.scan_project(
+                        project_id,
+                        prepared_models,
+                        cancellation_token=cancellation_token,
+                    )
+                except CancelledError:
+                    raise
+                except Exception as exc:
+                    state["status"] = ProjectStatus.FAILED.value
+                    state["error"] = f"Scanner failed: {exc}"
+                    now_err = datetime.now(timezone.utc).isoformat()
+                    state.setdefault("timestamps", {})["failed_at"] = now_err
+                    state["timestamps"]["updated_at"] = now_err
+                    self.persistence.save_project(state)
+                    if callbacks and callbacks.on_status_change:
+                        callbacks.on_status_change(ProjectStatus.FAILED.value)
+                    if callbacks and callbacks.on_error:
+                        callbacks.on_error(exc, None)
+                    raise
+
+                evidence_summary = {
+                    "status": "completed",
+                    "evidence_revision": evidence_result.evidence_revision,
+                    "episode_counts": evidence_result.episode_counts,
+                    "total_evidence_count": evidence_result.total_evidence_count,
+                    "reused_chunk_count": evidence_result.reused_chunk_count,
+                    "requested_chunk_count": evidence_result.requested_chunk_count,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }
+                self.persistence.save_checkpoint(project_id, "evidence", evidence_summary)
+                now_ready = datetime.now(timezone.utc).isoformat()
+                phase5_msg = "Analysis pipeline stopped: Full Episode Evidence is complete (EVIDENCE_READY); Phase 5 Season Evidence Catalog is not implemented."
+                state["status"] = ProjectStatus.EVIDENCE_READY.value
+                state["evidence"] = evidence_summary
+                state["error"] = phase5_msg
+                state.setdefault("timestamps", {})["evidence_ready_at"] = now_ready
+                state["timestamps"]["updated_at"] = now_ready
+                self.persistence.save_project(state)
+                if callbacks and callbacks.on_evidence_ready:
+                    callbacks.on_evidence_ready(evidence_result.evidence_revision, evidence_result.episode_counts)
+                if callbacks and callbacks.on_status_change:
+                    callbacks.on_status_change(ProjectStatus.EVIDENCE_READY.value)
+                phase5_err = AnalysisPipelineUnavailableError(phase5_msg)
                 if callbacks and callbacks.on_error:
-                    callbacks.on_error(scanner_err, None)
-                raise scanner_err
+                    callbacks.on_error(phase5_err, None)
+                raise phase5_err
 
             # Step 2: Source integrity check (source changes fail no substitution)
             verify_source_integrity(state["source_fingerprints"], cancellation_token=cancellation_token)

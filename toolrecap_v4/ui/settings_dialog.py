@@ -1405,6 +1405,10 @@ class SettingsDialog(tk.Toplevel):
             self.settings.gateway_endpoint = gw_url
             self.settings.gateway_sub_model = self.var_gw_sub_model.get().strip()
             self.settings.gateway_sub_reasoning = self.var_gw_sub_reasoning.get().strip()
+            # Phase 4 backend adaptation: preserve the current UI while saving the
+            # literal provider-neutral route into the factual Scanner fields.
+            self.settings.scanner_model = self.settings.gateway_sub_model
+            self.settings.scanner_reasoning = self.settings.gateway_sub_reasoning
             self.settings.gateway_prime_model = self.var_gw_prime_model.get().strip()
             self.settings.gateway_prime_reasoning = self.var_gw_prime_reasoning.get().strip()
             self.settings.gateway_model = self.settings.gateway_sub_model
