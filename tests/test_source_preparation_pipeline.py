@@ -44,13 +44,14 @@ from toolrecap_v4.analysis.source_prep.subtitles.cache import (
     SubtitleCacheManager,
     compute_subtitle_cache_key,
 )
-from toolrecap_v4.analysis.source_prep.subtitles.discovery import select_best_english_subtitles
+from toolrecap_v4.analysis.source_prep.subtitles.discovery import discover_sidecars, select_best_english_subtitles
 from toolrecap_v4.analysis.source_prep.subtitles.models import (
     SubtitleCue,
     SubtitleStreamInfo,
     SubtitleTrack,
 )
 from toolrecap_v4.analysis.source_prep.subtitles.ocr import OcrAdapter, OcrResult
+from toolrecap_v4.analysis.source_prep.subtitles.parsers import parse_ass
 from toolrecap_v4.analysis.source_prep.subtitles.pgs import create_minimal_pgs_sup
 from toolrecap_v4.analysis.source_prep.subtitles.pipeline import (
     SubtitlePipeline,
@@ -99,6 +100,52 @@ Hello from VTT sidecar!
 00:04.500 --> 00:06.000
 Second line in VTT.
 """
+
+SAMPLE_SSA = """[Script Info]
+Title: Real SSA Fixture
+ScriptType: v4.00
+
+[V4 Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, TertiaryColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, AlphaLevel, Encoding
+Style: Default,Arial,20,16777215,255,0,0,0,0,1,2,0,2,10,10,10,0,1
+
+[Events]
+Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: Marked=0,0:00:01.00,0:00:03.00,Default,,0000,0000,0000,,Hello from real SSA.
+Dialogue: Marked=0,0:00:04.00,0:00:06.00,Default,,0000,0000,0000,,Second SSA line.
+"""
+
+
+def test_real_ssa_fixture_discovery_parse_and_pipeline_selection(tmp_path: Path):
+    video = _make_dummy_video(tmp_path / "show.s01e01.mkv")
+    ssa_path = tmp_path / "show.s01e01.eng.ssa"
+    ssa_path.write_text(SAMPLE_SSA, encoding="utf-8")
+
+    tracks = discover_sidecars(video, episode_id="show.s01e01")
+    assert len(tracks) == 1
+    assert tracks[0].source_format == "ssa"
+    assert tracks[0].is_full is True
+
+    cues = parse_ass(
+        ssa_path,
+        source_format="ssa",
+        language="eng",
+        episode_id="show.s01e01",
+        source_duration_ms=60_000,
+    )
+    assert [cue.text for cue in cues] == ["Hello from real SSA.", "Second SSA line."]
+    assert all(cue.source_format == "ssa" for cue in cues)
+
+    pipeline = SubtitlePipeline(cache_manager=SubtitleCacheManager(tmp_path / "cache"))
+    result = pipeline.extract_cues(
+        tracks[0],
+        source_video=video,
+        episode_id="show.s01e01",
+        source_duration_ms=60_000,
+    )
+    assert result.status == "success"
+    assert result.source_format == "ssa"
+    assert len(result.cues) == 2
 
 
 def _make_dummy_video(path: Path) -> Path:

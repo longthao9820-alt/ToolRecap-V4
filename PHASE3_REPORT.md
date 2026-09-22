@@ -4,7 +4,7 @@
 **Hợp đồng**: `phase3-docs-acceptance rev1 objective4`  
 **Nền tảng mục tiêu**: Windows 10/11 x64 Portable  
 **Phiên bản ứng dụng**: `4.0.0`  
-**Trạng thái**: NGHIỆM THU HOÀN TẤT (PHASE 3 SOURCE PREPARATION ACCEPTED)
+**Trạng thái**: NGHIỆM THU HOÀN TẤT (PHASE 3 SOURCE PREPARATION ACCEPTED; SSA/Vision OCR closure verified)
 
 ---
 
@@ -35,10 +35,15 @@ Phase 3 triển khai toàn diện và hoàn tất hệ thống **Chuẩn bị ng
    - Khi đã có Final JSON hợp lệ hoặc import: bỏ qua hoàn toàn source prep và Gateway, thực hiện chính xác 0 lượt gọi AI.
    - Khi chưa có Final JSON: chạy chuẩn bị nguồn tuần tự cho từng tập (`E01`, `E02`, ...), lưu tạo tác và chuyển trạng thái sang `ProjectStatus.PREPARED`, sau đó dừng có kiểm soát trước Scanner với ngoại lệ rõ ràng `AnalysisPipelineUnavailableError`.
 7. **Bộ kiểm thử toàn diện**:
-   - Toàn bộ **330 bài kiểm thử đạt 100%** (215 bài kế thừa từ Phase 1/2 + 115 bài mới được xây dựng trong Phase 3).
+   - Phase 2 baseline: **237 bài đạt**.
+   - Phase 3 trước closure: **330 bài đạt**, tăng ròng **93 bài** so với Phase 2 (không thay đổi tests chỉ để khớp số học).
+   - Phase 3 final closure: **336 bài đạt** sau khi thêm đúng 1 regression SSA và 5 regression Vision OCR bắt buộc.
    - Biên dịch bytecode 100% thành công (0 lỗi).
    - Import toàn bộ 49 submodule thành công (0 lỗi).
    - Không xuất hiện bất kỳ API truyền video cũ nào hay logic phán đoán kịch bản (editorial policy) nào trong mã nguồn phân tích.
+   - **SSA closure:** `.ssa` sidecar được discovery, chọn English Full, parse bằng ASS/SSA parser và chạy qua `SubtitlePipeline`; test dùng cú pháp SSA `ScriptType: v4.00`, `V4 Styles`, `Marked` dialogue.
+   - **Vision OCR closure:** local OCR fail + Vision bật chỉ gửi cropped subtitle still qua Phase 2 `submit_image_chat`; Vision tắt/local OCR đạt thì 0 image Gateway calls; gateway failure và full-frame/oversize đều bị chặn hoặc trả fallback/error.
+
 
 ---
 
@@ -75,8 +80,8 @@ Phase 3 triển khai toàn diện và hoàn tất hệ thống **Chuẩn bị ng
 
 ### 2.3 Bộ kiểm thử mới trong `tests/` (4 tệp)
 26. `tests/test_analysis_core_subtitles.py`: 19 bài kiểm thử đơn vị cho models, cue bounds, stream indexing, cache hashing, sidecar discovery, PGS/VobSub parsing.
-27. `tests/test_analysis_ocr_stt.py`: 39 bài kiểm thử đơn vị cho OCR quality gate, crop validation, model management, STT windowing, energy gating, device policies.
-28. `tests/test_source_preparation_pipeline.py`: 27 bài kiểm thử tích hợp cho đường ống chuẩn bị nguồn, thứ bậc fallback, bộ nhớ đệm và invalidation.
+27. `tests/test_analysis_ocr_stt.py`: 44 bài kiểm thử đơn vị cho OCR quality gate, crop validation, 5 trường hợp Vision OCR safety, model management, STT windowing, energy gating, device policies.
+28. `tests/test_source_preparation_pipeline.py`: 28 bài kiểm thử tích hợp cho đường ống chuẩn bị nguồn, cú pháp/path SSA thật, thứ bậc fallback, bộ nhớ đệm và invalidation.
 29. `tests/test_workflow_source_prep.py`: 7 bài kiểm thử tích hợp workflow với chuẩn bị nguồn tuần tự, trạng thái `PREPARED`, hủy bỏ và phục hồi.
 
 ### 2.4 Tài liệu cập nhật & báo cáo (3 tệp)
@@ -206,10 +211,10 @@ rootdir: C:\Users\Long\Desktop\ToolRecap_V4
 configfile: pyproject.toml
 testpaths: tests
 plugins: anyio-4.14.2, asyncio-1.4.0
-collected 330 items
+collected 336 items
 
 tests\test_analysis_core_subtitles.py ...................                [  5%]
-tests\test_analysis_ocr_stt.py .......................................   [ 17%]
+tests\test_analysis_ocr_stt.py ............................................ [ 18%]
 tests\test_cancellation.py .....                                         [ 19%]
 tests\test_discovery.py ...........                                      [ 22%]
 tests\test_gateway.py .................................                  [ 32%]
@@ -220,7 +225,7 @@ tests\test_renderer.py .................                                 [ 48%]
 tests\test_schema.py .....                                               [ 50%]
 tests\test_secrets.py .....                                              [ 51%]
 tests\test_settings.py ..                                                [ 52%]
-tests\test_source_preparation_pipeline.py ...........................    [ 60%]
+tests\test_source_preparation_pipeline.py ............................   [ 61%]
 tests\test_subtitles.py .....                                            [ 62%]
 tests\test_ui_notifications.py .....                                     [ 63%]
 tests\test_ui_responsive.py ......                                       [ 65%]
@@ -233,7 +238,7 @@ tests\test_voice_studio.py .........                                     [ 92%]
 tests\test_workflow.py .................                                 [ 97%]
 tests\test_workflow_source_prep.py .......                               [100%]
 
-============================ 330 passed in 42.64s =============================
+============================ 336 passed in 43.45s =============================
 ```
 
 ### 4.4 Kiểm tra Grep rà soát Transport cũ và Chính sách biên tập
@@ -250,5 +255,5 @@ tests\test_workflow_source_prep.py .......                               [100%]
 2. **Chưa triển khai Season Catalog & Season Planner**: Việc tổng hợp danh mục toàn mùa và lập kế hoạch recap tổng thể chưa được kích hoạt.
 3. **Chưa triển khai Output Writers & Output Directory Resolver**: Việc sinh kịch bản JSON mới từ kế hoạch chưa có; hiện tại chỉ chấp nhận Final JSON đã có hoặc được import từ ngoài.
 4. **Không có bản dựng nhị phân (Executable)**: Chưa chạy `build_portable.py` / PyInstaller; thư mục `dist/` và `release/` chưa có tệp thực thi `ToolRecapV4.exe`.
-5. **Không gọi API AI bên ngoài hoặc tải model trực tiếp trong kiểm thử**: Tất cả 330 bài kiểm thử sử dụng adapter giả lập (mocked adapters), kiểm tra thuật toán, cấu trúc dữ liệu và xử lý ngoại lệ cục bộ mà không phụ thuộc mạng internet hay phần cứng GPU bắt buộc.
-6. **Git**: Mọi thay đổi Phase 3 sẽ được checkpoint bằng commit cục bộ sau khi kiểm thử đạt; không tạo remote hoặc push.
+5. **Không gọi API AI bên ngoài hoặc tải model trực tiếp trong kiểm thử**: Tất cả 336 bài kiểm thử sử dụng adapter giả lập (mocked adapters), kiểm tra thuật toán, cấu trúc dữ liệu và xử lý ngoại lệ cục bộ mà không phụ thuộc mạng internet hay phần cứng GPU bắt buộc.
+6. **Git**: Phase 3 có checkpoint chính `71a7693`; closure SSA/Vision OCR được checkpoint bằng corrective commit riêng. Không cấu hình remote hoặc push.

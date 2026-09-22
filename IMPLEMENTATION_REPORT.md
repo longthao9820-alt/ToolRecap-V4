@@ -86,11 +86,13 @@ All validation suites executed and passed cleanly:
   - Result: All 49 submodules cleanly imported without error.
 - **Full Pytest Suite**:
   - Command: `pytest --basetemp="C:\Users\Long\AppData\Local\Temp\kilo\pytest_v4_phase3_run"`
-   - Result: **330 passed in 42.64s** (100% pass rate, 0 failures, 0 errors, 0 skipped).
-- **Test Suite Breakdown (330 tests total)**:
+   - Phase 2 baseline: **237 passed**.
+   - Pre-closure Phase 3 suite: **330 passed**, tăng ròng **93 tests** so với Phase 2 baseline **237 passed**.
+   - Final closure suite sau 1 SSA + 5 Vision OCR regression tests: **336 passed in 43.45s**, 0 failures, 0 errors, 0 skipped.
+- **Test Suite Breakdown (336 tests total)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
-  - `tests/test_analysis_ocr_stt.py`: 39 passed (OCR quality gate, crop validation, model management, STT windowing, energy gating).
-  - `tests/test_source_preparation_pipeline.py`: 27 passed (pipeline orchestration, fallback hierarchy, inventory hashing, semantic invalidation).
+  - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
+  - `tests/test_source_preparation_pipeline.py`: 28 passed (pipeline orchestration, real SSA path, fallback hierarchy, inventory hashing, semantic invalidation).
   - `tests/test_workflow_source_prep.py`: 7 passed (workflow integration, sequential prep, PREPARED status, resume, cancellation).
   - `tests/test_persistence.py`: 8 passed (atomic roundtrips, secret exclusion, prepared episode/manifest persistence).
   - `tests/test_workflow.py`: 17 passed (import zero-AI, resume, retry, publication collision, state reconciliation).

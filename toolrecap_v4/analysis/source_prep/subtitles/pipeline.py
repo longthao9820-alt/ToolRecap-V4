@@ -290,7 +290,7 @@ class SubtitlePipeline:
                 cues = parse_ass(
                     file_to_parse,
                     source_type=track.source_type,
-                    source_format="ass",
+                    source_format=fmt,
                     stream_index=track.stream_index,
                     source_file=str(file_to_parse),
                     language=track.language,

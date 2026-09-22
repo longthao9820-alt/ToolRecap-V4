@@ -357,6 +357,126 @@ def test_vision_ocr_cancellation_propagates():
         vision_adapter.ocr_cropped_image(crop, cancellation_token=token)
 
 
+def test_vision_ocr_safety_disabled_zero_gateway():
+    crop = Image.new("RGB", (300, 50), color="white")
+    fake_gateway = MagicMock()
+    vision_adapter = VisionOcrAdapter(gateway=fake_gateway, enabled=False)
+    assert vision_adapter.is_available() is False
+    assert vision_adapter.ocr_cropped_image(crop) is None
+    fake_gateway.submit_image_chat.assert_not_called()
+
+    # Local OCR fails (empty output), vision adapter disabled -> zero gateway calls
+    local_engine = MagicMock(return_value=[])
+    ocr_adapter = OcrAdapter(custom_engine=local_engine, vision_adapter=vision_adapter)
+    res = ocr_adapter.ocr_image(crop)
+
+    assert res.is_valid is False
+    assert res.source == "rejected"
+    assert "Vision OCR fallback disabled" in res.reason
+    fake_gateway.submit_image_chat.assert_not_called()
+
+
+def test_vision_ocr_safety_local_valid_zero_gateway():
+    crop = Image.new("RGB", (300, 50), color="white")
+    fake_gateway = MagicMock()
+    # Vision adapter is ENABLED with fake gateway
+    vision_adapter = VisionOcrAdapter(gateway=fake_gateway, enabled=True, model="gpt-4o-mini")
+    assert vision_adapter.is_available() is True
+
+    # Local OCR succeeds with high confidence
+    local_engine = MagicMock(return_value=([[None, "Valid Subtitle Text", 0.95]], None))
+    ocr_adapter = OcrAdapter(custom_engine=local_engine, vision_adapter=vision_adapter)
+    res = ocr_adapter.ocr_image(crop)
+
+    assert res.is_valid is True
+    assert res.source == "rapidocr"
+    assert res.text == "Valid Subtitle Text"
+    assert res.confidence == 0.95
+    # Strict safety invariant: zero Gateway calls when local OCR succeeds
+    fake_gateway.submit_image_chat.assert_not_called()
+
+
+def test_vision_ocr_safety_rejected_enabled_crop_only():
+    crop = Image.new("RGB", (250, 45), color="white")
+    fake_gateway = MagicMock()
+    fake_res = MagicMock()
+    fake_res.raw_response = "Vision Subtitle Fallback Text"
+    fake_gateway.submit_image_chat.return_value = fake_res
+
+    vision_adapter = VisionOcrAdapter(gateway=fake_gateway, enabled=True, model="gpt-4o-mini")
+
+    # Local OCR returns low confidence (0.25) -> rejected by quality gate
+    local_engine = MagicMock(return_value=([[None, "unreadable garbage", 0.25]], None))
+    ocr_adapter = OcrAdapter(custom_engine=local_engine, vision_adapter=vision_adapter)
+    res = ocr_adapter.ocr_image(crop)
+
+    assert res.is_valid is True
+    assert res.source == "vision_ai"
+    assert res.text == "Vision Subtitle Fallback Text"
+    assert res.confidence == 0.85
+
+    # Verify Gateway boundary contract:
+    fake_gateway.submit_image_chat.assert_called_once()
+    call_kwargs = fake_gateway.submit_image_chat.call_args[1]
+    assert call_kwargs["prompt"] == VisionOcrAdapter.OCR_PROMPT
+    assert call_kwargs["phase"] == "phase3_ocr"
+    assert call_kwargs["expect_json"] is False
+    assert len(call_kwargs["images"]) == 1
+    # Verify crop-only: clean PNG bytes
+    assert call_kwargs["images"][0].startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_vision_ocr_safety_gateway_failure_rejection_path():
+    crop = Image.new("RGB", (280, 50), color="white")
+    fake_gateway = MagicMock()
+    # Simulate gateway failure (e.g. 500 error / network failure)
+    fake_gateway.submit_image_chat.side_effect = ToolRecapError("Gateway service 503 unavailable")
+
+    vision_adapter = VisionOcrAdapter(gateway=fake_gateway, enabled=True)
+
+    # Direct Vision adapter handles failure safely (returns None)
+    assert vision_adapter.ocr_cropped_image(crop) is None
+
+    # Local OCR fails and Vision gateway fails -> must NOT crash, returns rejected OcrResult
+    local_engine = MagicMock(return_value=[])
+    ocr_adapter = OcrAdapter(custom_engine=local_engine, vision_adapter=vision_adapter)
+    res = ocr_adapter.ocr_image(crop)
+
+    assert res.is_valid is False
+    assert res.source == "rejected"
+    assert "Vision OCR yielded no valid text" in res.reason
+
+    # Also test gateway returning empty response (raw_response = "")
+    fake_gateway_empty = MagicMock()
+    fake_res = MagicMock()
+    fake_res.raw_response = ""
+    fake_gateway_empty.submit_image_chat.return_value = fake_res
+    vision_adapter_empty = VisionOcrAdapter(gateway=fake_gateway_empty, enabled=True)
+    ocr_adapter_empty = OcrAdapter(custom_engine=local_engine, vision_adapter=vision_adapter_empty)
+    res_empty = ocr_adapter_empty.ocr_image(crop)
+    assert res_empty.is_valid is False
+    assert res_empty.source == "rejected"
+
+
+def test_vision_ocr_safety_oversized_full_frame_rejected():
+    full_frame = Image.new("RGB", (1920, 1080), color="black")
+    fake_gateway = MagicMock()
+    vision_adapter = VisionOcrAdapter(gateway=fake_gateway, enabled=True)
+
+    # 1. Direct call on VisionOcrAdapter with full frame raises ValueError and makes ZERO gateway calls
+    with pytest.raises(ValueError, match="Bounding box violation: image dimensions.*resemble full video frame"):
+        vision_adapter.ocr_cropped_image(full_frame)
+    fake_gateway.submit_image_chat.assert_not_called()
+
+    # 2. OcrAdapter.ocr_image raises ValueError before engine or gateway is touched
+    local_engine = MagicMock()
+    ocr_adapter = OcrAdapter(custom_engine=local_engine, vision_adapter=vision_adapter)
+    with pytest.raises(ValueError, match="Bounding box violation"):
+        ocr_adapter.ocr_image(full_frame)
+    local_engine.assert_not_called()
+    fake_gateway.submit_image_chat.assert_not_called()
+
+
 # ============================================================================
 # 5. STT Device Policy & Safe CPU Fallback Tests
 # ============================================================================

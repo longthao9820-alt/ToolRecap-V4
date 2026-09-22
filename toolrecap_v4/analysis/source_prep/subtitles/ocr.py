@@ -405,19 +405,23 @@ class VisionOcrAdapter:
         image.save(bio, format="PNG")
         png_bytes = bio.getvalue()
 
-        result = self.gateway.submit_image_chat(
-            prompt=self.OCR_PROMPT,
-            images=[png_bytes],
-            model=self.model,
-            system_prompt="You are a high-precision OCR engine for subtitle bitmap crops.",
-            stream=False,
-            expect_json=False,
-            cancellation_token=cancellation_token,
-            phase="phase3_ocr",
-        )
-
-        if result and getattr(result, "raw_response", None):
-            return str(result.raw_response).strip()
+        try:
+            result = self.gateway.submit_image_chat(
+                prompt=self.OCR_PROMPT,
+                images=[png_bytes],
+                model=self.model,
+                system_prompt="You are a high-precision OCR engine for subtitle bitmap crops.",
+                stream=False,
+                expect_json=False,
+                cancellation_token=cancellation_token,
+                phase="phase3_ocr",
+            )
+            if result and getattr(result, "raw_response", None):
+                return str(result.raw_response).strip()
+        except CancelledError:
+            raise
+        except Exception:
+            return None
 
         return None
 
