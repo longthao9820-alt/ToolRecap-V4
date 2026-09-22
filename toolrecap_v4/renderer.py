@@ -1,0 +1,689 @@
+"""Video rendering pipeline for ToolRecap V4.
+
+Invariants:
+- Exact JSON ordered multi-source timestamps.
+- Video normalized to common even canvas with aspectfit padding and uniform fps.
+- Audio normalized to stereo 48kHz; generates silence for missing audio.
+- Narration synthesis unchanged; fails on oversize (NarrationFitError); never trims clips.
+- Audio gains exact dB: ducking applied only while narration overlaps source_audio=true.
+- Original dialogue segments never ducked.
+- Final continuous TWO PASS EBU R128 loudnorm and peak limiting.
+- GPU acceleration via actual tested media primitives (NVENC / AMF / QSV) with CPU fallback.
+- Internal temporary directory isolated; only {title}.mp4, {title}.narration.srt, and
+  {title}.original.srt published atomically.
+- Source files and project JSON strictly immutable.
+- Cancellation and failure cleanup guaranteed.
+"""
+
+from __future__ import annotations
+
+import copy
+from dataclasses import asdict, dataclass
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import sys
+import tempfile
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from toolrecap_v4.cancellation import CancellationToken
+from toolrecap_v4.errors import (
+    CancelledError,
+    InvalidAudioError,
+    JsonSourceNotFoundError,
+    NarrationFitError,
+    TimestampBoundaryError,
+    ToolRecapError,
+    VoiceStudioUnavailableError,
+    WindowsCollisionError,
+    WindowsNameError,
+)
+from toolrecap_v4.media import (
+    EncoderStatus,
+    MediaProbeResult,
+    calculate_auto_canvas,
+    detect_gpu_encoder,
+    find_binary,
+    get_video_encode_args,
+    probe_duration,
+    probe_media,
+    run_command,
+    select_audio_for_source,
+)
+from toolrecap_v4.persistence import get_storage_root
+from toolrecap_v4.settings import AppSettings
+from toolrecap_v4.subtitles import (
+    escape_ffmpeg_subtitles_path,
+    extract_subtitles_for_output,
+    generate_subtitles,
+    write_srt,
+)
+from toolrecap_v4.validator import validate_windows_name
+from toolrecap_v4.voice_studio import VoiceStudioAdapter, validate_wav_bytes
+
+
+class RenderError(ToolRecapError):
+    """Base exception for render failures."""
+
+
+class SourceCollisionError(RenderError):
+    """Raised when publication path collides with source files."""
+
+
+class RenderValidationError(RenderError):
+    """Raised when rendered output fails technical validation."""
+
+
+@dataclass(frozen=True)
+class RenderResult:
+    """Result of rendering a single output title."""
+
+    output_path: Path
+    narration_srt_path: Path
+    original_srt_path: Path
+    duration: float
+    title: str
+    render_id: str
+    video_codec: str
+    audio_codec: str
+    width: int
+    height: int
+    fps: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "output_path": str(self.output_path),
+            "narration_srt_path": str(self.narration_srt_path),
+            "original_srt_path": str(self.original_srt_path),
+            "duration": self.duration,
+            "title": self.title,
+            "render_id": self.render_id,
+            "video_codec": self.video_codec,
+            "audio_codec": self.audio_codec,
+            "width": self.width,
+            "height": self.height,
+            "fps": self.fps,
+        }
+
+
+def compute_file_sha256(path: Path | str) -> str:
+    """Compute SHA-256 hash of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def calculate_ducking_gains(
+    original_db: float,
+    commentary_db: float,
+    ducking_amount_db: float,
+    auto_duck: bool,
+) -> tuple[float, float, float]:
+    """Calculate linear gain multipliers: (normal_orig, ducked_orig, commentary)."""
+    normal_orig = 10.0 ** (original_db / 20.0)
+    if auto_duck:
+        duck_delta = ducking_amount_db if ducking_amount_db <= 0 else -ducking_amount_db
+        ducked_db = original_db + duck_delta
+        ducked_orig = 10.0 ** (ducked_db / 20.0)
+    else:
+        ducked_orig = normal_orig
+    commentary_linear = 10.0 ** (commentary_db / 20.0)
+    return normal_orig, ducked_orig, commentary_linear
+
+
+def measure_loudnorm(
+    media_path: Path | str,
+    *,
+    target_lufs: float = -14.0,
+    true_peak: float = -1.0,
+    ffmpeg_path: Path | str | None = None,
+    timeout: float = 60.0,
+    cancellation_token: CancellationToken | None = None,
+) -> dict[str, str]:
+    """Run pass 1 loudnorm measurement on media file and return parsed JSON parameters."""
+    binary = find_binary("ffmpeg", ffmpeg_path)
+    null_sink = "NUL" if sys.platform == "win32" else "/dev/null"
+    cmd = [
+        str(binary),
+        "-hide_banner",
+        "-i", str(Path(media_path).resolve()),
+        "-af", f"loudnorm=I={target_lufs}:TP={true_peak}:print_format=json",
+        "-f", "null",
+        null_sink,
+    ]
+
+    res = run_command(cmd, timeout=timeout, cancellation_token=cancellation_token)
+    if res.exit_code != 0:
+        raise RenderError(f"Pass 1 loudnorm measurement failed (exit {res.exit_code}): {res.stderr.strip()}")
+
+    matches = re.findall(r"\{\s*\"input_i\"[\s\S]*?\}", res.stderr)
+    if not matches:
+        return {}
+
+    try:
+        data = json.loads(matches[-1])
+        if isinstance(data, dict):
+            return {k: str(v) for k, v in data.items()}
+    except Exception:
+        pass
+    return {}
+
+
+def build_two_pass_loudnorm_filter(
+    measured: dict[str, str],
+    *,
+    target_lufs: float = -14.0,
+    true_peak: float = -1.0,
+) -> str:
+    """Build FFmpeg loudnorm filter string for pass 2 from pass 1 measurements."""
+    input_i = measured.get("input_i", "")
+    target_offset = measured.get("target_offset", "")
+
+    if not input_i or input_i == "-inf" or target_offset == "inf":
+        return f"loudnorm=I={target_lufs}:TP={true_peak}"
+
+    try:
+        val = float(input_i)
+        if val <= -70.0:
+            return f"loudnorm=I={target_lufs}:TP={true_peak}"
+    except ValueError:
+        return f"loudnorm=I={target_lufs}:TP={true_peak}"
+
+    input_lra = measured.get("input_lra", "7.0")
+    input_tp = measured.get("input_tp", "-1.0")
+    input_thresh = measured.get("input_thresh", "-24.0")
+    offset = measured.get("target_offset", "0.0")
+
+    return (
+        f"loudnorm=I={target_lufs}:TP={true_peak}:"
+        f"measured_I={input_i}:measured_LRA={input_lra}:measured_TP={input_tp}:"
+        f"measured_thresh={input_thresh}:offset={offset}:linear=true"
+    )
+
+
+def get_render_work_root(override_dir: Optional[str | Path] = None) -> Path:
+    """Return render scratch directory strictly in LOCALAPPDATA/ToolRecapV4/render-work."""
+    base = get_storage_root(override_dir) / "render-work"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _resolve_sources(
+    source_names: Sequence[str],
+    source_paths: dict[str, Path | str],
+) -> dict[str, Path]:
+    """Map source basenames to verified absolute Path objects.
+    
+    Exact mapping ONLY. Directory lookup and traversal are strictly rejected.
+    """
+    if not isinstance(source_paths, dict):
+        raise TypeError(f"source_paths must be an exact mapping dict, got {type(source_paths).__name__}")
+
+    resolved: dict[str, Path] = {}
+    for name in source_names:
+        if not isinstance(name, str):
+            raise JsonSourceNotFoundError(f"Source file name must be a string, got {type(name).__name__}")
+        if "/" in name or "\\" in name or name in {".", ".."}:
+            raise JsonSourceNotFoundError(
+                f"Source file name '{name}' contains directory traversal or path separators."
+            )
+        if name not in source_paths:
+            raise JsonSourceNotFoundError(f"Source file '{name}' not provided in source_paths mapping.")
+        candidate = Path(source_paths[name]).resolve()
+        if not candidate.is_file():
+            raise JsonSourceNotFoundError(f"Source file '{name}' at '{candidate}' does not exist.")
+        resolved[name] = candidate
+
+    return resolved
+
+
+def render_output(
+    output_def: dict[str, Any],
+    source_paths: dict[str, Path | str],
+    output_dir: Path | str,
+    *,
+    settings: AppSettings | None = None,
+    voice_adapter: VoiceStudioAdapter | None = None,
+    cancellation_token: CancellationToken | None = None,
+    narration_audio_map: dict[str, Path | str] | None = None,
+    ffmpeg_path: Path | str | None = None,
+    work_dir: Path | str | None = None,
+) -> RenderResult:
+    """Render a single output specification according to all technical invariants."""
+    if cancellation_token:
+        cancellation_token.check_cancelled()
+
+    cfg = settings or AppSettings()
+    ffmpeg = find_binary("ffmpeg", ffmpeg_path)
+    out_dir = Path(output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    title = output_def.get("title")
+    validate_windows_name(title, "title")
+
+    render_id = output_def.get("render_id")
+    if render_id is not None:
+        validate_windows_name(render_id, "render_id")
+    else:
+        render_id = title
+
+    segments = output_def.get("segments", [])
+    if not segments:
+        raise RenderError(f"Output '{render_id}' contains no segments.")
+
+    # Collect source files
+    source_names = [seg["source_file"] for seg in segments]
+    resolved_sources = _resolve_sources(source_names, source_paths)
+
+    # Collision check: publication files must not collide with any source files (including unused)
+    target_mp4 = out_dir / f"{title}.mp4"
+    target_narr_srt = out_dir / f"{title}.narration.srt"
+    target_orig_srt = out_dir / f"{title}.original.srt"
+    publication_targets = {target_mp4.resolve(), target_narr_srt.resolve(), target_orig_srt.resolve()}
+
+    for src_name, src_val in source_paths.items():
+        src_path = Path(src_val).resolve()
+        if src_path in publication_targets:
+            raise SourceCollisionError(
+                f"Publication target collides with source file '{src_name}' at '{src_path}'."
+            )
+
+    # Probe all source files
+    probes: dict[str, MediaProbeResult] = {}
+    for name, path in resolved_sources.items():
+        probes[name] = probe_media(path, cancellation_token=cancellation_token)
+
+    # Canvas dimensions and FPS (guarantee even numbers for H.264/yuv420p)
+    first_seg = segments[0]
+    first_src_name = first_seg["source_file"]
+    first_probe = probes[first_src_name]
+
+    if getattr(cfg, "canvas_auto", True):
+        canvas_w, canvas_h = calculate_auto_canvas(
+            first_probe,
+            fallback_w=int(cfg.canvas_width),
+            fallback_h=int(cfg.canvas_height),
+        )
+    else:
+        canvas_w = int(cfg.canvas_width)
+        canvas_h = int(cfg.canvas_height)
+        if canvas_w % 2 != 0:
+            canvas_w += 1
+        if canvas_h % 2 != 0:
+            canvas_h += 1
+    canvas_fps = float(cfg.canvas_fps)
+
+    # Prepare isolated temporary working directory in LOCALAPPDATA/ToolRecapV4/render-work
+    render_work_base = Path(work_dir).resolve() if work_dir is not None else get_render_work_root()
+    render_work_base.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix="render_", dir=render_work_base)).resolve()
+    segments_dir = temp_dir / "segments"
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    narration_dir = temp_dir / "narration"
+    narration_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        segment_mkv_paths: list[Path] = []
+        normal_orig_linear, ducked_orig_linear, comm_linear = calculate_ducking_gains(
+            cfg.original_audio_db,
+            cfg.commentary_audio_db,
+            cfg.ducking_amount_db,
+            cfg.auto_duck,
+        )
+
+        # Video encode args for segment intermediate (GPU or CPU)
+        v_args, enc_status = get_video_encode_args(
+            quality=cfg.quality,
+            use_gpu=cfg.use_gpu,
+            ffmpeg_path=ffmpeg,
+        )
+
+        for seg_idx, seg in enumerate(segments):
+            if cancellation_token:
+                cancellation_token.check_cancelled()
+
+            seg_id = seg.get("segment_id")
+            validate_windows_name(seg_id, "segment_id")
+            src_name = seg["source_file"]
+            src_path = resolved_sources[src_name]
+            src_probe = probes[src_name]
+
+            start_ms = int(seg["start_ms"])
+            end_ms = int(seg["end_ms"])
+            if start_ms < 0:
+                raise TimestampBoundaryError(
+                    f"Segment '{seg_id}' start_ms ({start_ms}) cannot be negative."
+                )
+            if end_ms <= start_ms:
+                raise TimestampBoundaryError(
+                    f"Segment '{seg_id}' end_ms ({end_ms}) <= start_ms ({start_ms})."
+                )
+
+            seg_dur_ms = end_ms - start_ms
+            seg_dur_s = seg_dur_ms / 1000.0
+            seg_start_s = start_ms / 1000.0
+
+            # Source duration validation: strict actual duration, no 100ms bypass
+            src_dur_ms = int(round(src_probe.duration * 1000.0))
+            if src_dur_ms > 0 and end_ms > src_dur_ms:
+                raise TimestampBoundaryError(
+                    f"Segment '{seg_id}' end_ms ({end_ms}ms) exceeds source duration ({src_dur_ms}ms) for '{src_name}'."
+                )
+
+            seg_type = seg.get("type", "narration")
+            narration_text = seg.get("narration")
+            if narration_text is None:
+                narration_text = ""
+            source_audio_enabled = bool(seg.get("source_audio", True))
+
+            # Narration synthesis / retrieval
+            narr_wav: Optional[Path] = None
+            narr_dur_s = 0.0
+
+            if seg_type == "narration" and narration_text:
+                if narration_audio_map and seg_id in narration_audio_map:
+                    narr_wav = Path(narration_audio_map[seg_id]).resolve()
+                    if not narr_wav.is_file():
+                        raise RenderError(
+                            f"Narration audio file for segment '{seg_id}' not found at '{narr_wav}'."
+                        )
+                    narr_dur_s = validate_wav_bytes(narr_wav.read_bytes())
+                elif voice_adapter is not None:
+                    wav_bytes = voice_adapter.synthesize(
+                        narration_text,
+                        voice=cfg.voice_id,
+                        model=cfg.voice_model,
+                        language=cfg.voice_language,
+                        style=cfg.voice_style,
+                        cancellation_token=cancellation_token,
+                    )
+                    narr_dur_s = validate_wav_bytes(wav_bytes)
+                    narr_wav = narration_dir / f"narr_{seg_idx:04d}.wav"
+                    narr_wav.write_bytes(wav_bytes)
+                else:
+                    raise VoiceStudioUnavailableError(
+                        f"Segment '{seg_id}' specifies narration text, but no voice adapter or narration audio was provided."
+                    )
+
+                # Narration Fit Policy Check (INVARIANT: Fail oversize, never trim clips)
+                narr_dur_ms = int(round(narr_dur_s * 1000.0))
+                if narr_dur_ms > seg_dur_ms:
+                    raise NarrationFitError(
+                        f"Narration fit policy violation in segment '{seg_id}': narration audio duration "
+                        f"({narr_dur_ms}ms) exceeds visual segment duration ({seg_dur_ms}ms). "
+                        f"Trimming or altering editorial clips is strictly prohibited."
+                    )
+
+            # Build FFmpeg command for normalized intermediate segment MKV
+            seg_mkv = segments_dir / f"seg_{seg_idx:04d}.mkv"
+            cmd: list[str] = [
+                str(ffmpeg),
+                "-y",
+                "-accurate_seek",
+                "-ss", f"{seg_start_s:.6f}",
+                "-t", f"{seg_dur_s:.6f}",
+                "-i", str(src_path),
+            ]
+
+            input_count = 1
+            has_usable_source_audio = src_probe.has_audio and source_audio_enabled
+
+            # Silence generator if no source audio
+            silence_input_idx: Optional[int] = None
+            if not has_usable_source_audio:
+                cmd.extend([
+                    "-f", "lavfi",
+                    "-i", f"anullsrc=r=48000:cl=stereo:d={seg_dur_s:.6f}",
+                ])
+                silence_input_idx = input_count
+                input_count += 1
+
+            # Narration audio input
+            narr_input_idx: Optional[int] = None
+            if narr_wav is not None and narr_wav.is_file():
+                cmd.extend(["-i", str(narr_wav)])
+                narr_input_idx = input_count
+                input_count += 1
+
+            # Video filter: aspect-fit into canvas, pad borders, set FPS and yuv420p
+            # Normalize anamorphic pixels to square pixels via ih*dar before aspect-fit scale
+            v_filter = (
+                f"[0:v]scale=ih*dar:ih,scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,"
+                f"fps={canvas_fps},format=yuv420p,"
+                f"trim=0:{seg_dur_s:.6f},setpts=PTS-STARTPTS[vout]"
+            )
+
+            filter_chains = [v_filter]
+
+            # Original audio filter
+            if has_usable_source_audio:
+                selection = select_audio_for_source(src_probe)
+                stream_idx = selection.selected_index if selection.selected_index is not None else 0
+                a_spec = f"0:{stream_idx}"
+
+                if seg_type == "original_dialogue":
+                    # Invariant: original dialogue never ducked
+                    gain_clause = f"volume={normal_orig_linear:.6f}:eval=once"
+                elif seg_type == "narration":
+                    if cfg.auto_duck and narr_dur_s > 0:
+                        # Duck only while narration overlaps
+                        gain_clause = f"volume='if(between(t,0,{narr_dur_s:.6f}),{ducked_orig_linear:.6f},{normal_orig_linear:.6f})':eval=frame"
+                    else:
+                        gain_clause = f"volume={normal_orig_linear:.6f}:eval=once"
+                else:
+                    gain_clause = f"volume={normal_orig_linear:.6f}:eval=once"
+
+                a_orig_chain = (
+                    f"[{a_spec}]aresample=48000,aformat=channel_layouts=stereo,{gain_clause},"
+                    f"apad=whole_dur={seg_dur_s:.6f},atrim=0:{seg_dur_s:.6f},asetpts=PTS-STARTPTS[aorig]"
+                )
+            else:
+                a_orig_chain = f"[{silence_input_idx}:a]atrim=0:{seg_dur_s:.6f},asetpts=PTS-STARTPTS[aorig]"
+
+            filter_chains.append(a_orig_chain)
+
+            # Narration commentary mix
+            final_audio_label = "[aorig]"
+            if narr_input_idx is not None:
+                a_narr_chain = (
+                    f"[{narr_input_idx}:a]aresample=48000,aformat=channel_layouts=stereo,"
+                    f"volume={comm_linear:.6f}:eval=once,"
+                    f"apad=whole_dur={seg_dur_s:.6f},atrim=0:{seg_dur_s:.6f},asetpts=PTS-STARTPTS[anarr]"
+                )
+                filter_chains.append(a_narr_chain)
+                filter_chains.append("[aorig][anarr]amix=inputs=2:duration=first:normalize=0[aout]")
+                final_audio_label = "[aout]"
+
+            filter_complex = ";".join(filter_chains)
+            cmd.extend([
+                "-filter_complex", filter_complex,
+                "-map", "[vout]",
+                "-map", final_audio_label,
+                *v_args,
+                "-c:a", "pcm_s16le",
+                str(seg_mkv),
+            ])
+
+            run_command(cmd, timeout=120.0, cancellation_token=cancellation_token, check=True)
+            if not seg_mkv.is_file() or seg_mkv.stat().st_size == 0:
+                raise RenderError(f"Failed to produce intermediate segment MKV for segment '{seg_id}'.")
+            segment_mkv_paths.append(seg_mkv)
+
+        # Concatenate all segment MKVs via concat demuxer
+        concat_list_file = temp_dir / "concat_list.txt"
+        concat_lines = [f"file '{p.as_posix()}'" for p in segment_mkv_paths]
+        concat_list_file.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
+
+        assembled_mkv = temp_dir / "assembled.mkv"
+        run_command(
+            [
+                str(ffmpeg),
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(concat_list_file),
+                "-c", "copy",
+                str(assembled_mkv),
+            ],
+            timeout=120.0,
+            cancellation_token=cancellation_token,
+            check=True,
+        )
+
+        # Subtitle generation into temp_dir
+        temp_narr_srt, temp_orig_srt = generate_subtitles(output_def, temp_dir, title=title)
+
+        # Two-pass Loudnorm: Pass 1 (measurement)
+        measured_params = measure_loudnorm(
+            assembled_mkv,
+            target_lufs=cfg.target_loudness_lufs,
+            true_peak=cfg.true_peak_db,
+            ffmpeg_path=ffmpeg,
+            cancellation_token=cancellation_token,
+        )
+        loudnorm_filter = build_two_pass_loudnorm_filter(
+            measured_params,
+            target_lufs=cfg.target_loudness_lufs,
+            true_peak=cfg.true_peak_db,
+        )
+
+        # Subtitle burning check
+        burn_subtitles = bool(cfg.burn_subtitles)
+        video_final_args: list[str] = []
+
+        if burn_subtitles:
+            # Check which subtitle file to burn
+            narr_has_cues = temp_narr_srt.is_file() and len(temp_narr_srt.read_text(encoding="utf-8").strip()) > 0
+            orig_has_cues = temp_orig_srt.is_file() and len(temp_orig_srt.read_text(encoding="utf-8").strip()) > 0
+            burn_file = temp_narr_srt if narr_has_cues else (temp_orig_srt if orig_has_cues else None)
+
+            if burn_file:
+                esc_path = escape_ffmpeg_subtitles_path(burn_file)
+                video_final_args = ["-vf", f"subtitles='{esc_path}'", *v_args]
+            else:
+                video_final_args = ["-c:v", "copy"]
+        else:
+            video_final_args = ["-c:v", "copy"]
+
+        # Pass 2: Final encode to temp_final_mp4
+        temp_final_mp4 = temp_dir / f"{title}.mp4"
+        run_command(
+            [
+                str(ffmpeg),
+                "-y",
+                "-i", str(assembled_mkv),
+                *video_final_args,
+                "-af", loudnorm_filter,
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-ar", "48000",
+                "-ac", "2",
+                str(temp_final_mp4),
+            ],
+            timeout=180.0,
+            cancellation_token=cancellation_token,
+            check=True,
+        )
+
+        # Technical validation of rendered output before publication
+        if not temp_final_mp4.is_file() or temp_final_mp4.stat().st_size == 0:
+            raise RenderValidationError("Rendered output MP4 is missing or empty.")
+
+        final_probe = probe_media(temp_final_mp4, cancellation_token=cancellation_token)
+        if final_probe.duration <= 0.0:
+            raise RenderValidationError(f"Rendered output has invalid duration: {final_probe.duration}s")
+        if not final_probe.has_video:
+            raise RenderValidationError("Rendered output has no video stream.")
+        if not final_probe.has_audio:
+            raise RenderValidationError("Rendered output has no audio stream.")
+        if final_probe.width != canvas_w or final_probe.height != canvas_h:
+            raise RenderValidationError(
+                f"Rendered canvas mismatch: expected {canvas_w}x{canvas_h}, got {final_probe.width}x{final_probe.height}"
+            )
+
+        # Atomic publication: copy to staging in target dir, then replace
+        published_files: list[tuple[Path, Path]] = [
+            (temp_final_mp4, target_mp4),
+            (temp_narr_srt, target_narr_srt),
+            (temp_orig_srt, target_orig_srt),
+        ]
+
+        for src_f, dst_f in published_files:
+            staging_f = dst_f.with_suffix(f"{dst_f.suffix}.tmp_{os.getpid()}")
+            shutil.copy2(src_f, staging_f)
+            staging_f.replace(dst_f)
+
+        v_codec = final_probe.video_streams[0].codec if final_probe.video_streams else "h264"
+        a_codec = final_probe.audio_streams[0].codec if final_probe.audio_streams else "aac"
+
+        return RenderResult(
+            output_path=target_mp4,
+            narration_srt_path=target_narr_srt,
+            original_srt_path=target_orig_srt,
+            duration=final_probe.duration,
+            title=title,
+            render_id=render_id,
+            video_codec=v_codec,
+            audio_codec=a_codec,
+            width=final_probe.width,
+            height=final_probe.height,
+            fps=final_probe.fps,
+        )
+
+    finally:
+        # Guarantee cleanup of internal temporary directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def render_project(
+    project_data: dict[str, Any],
+    source_paths: dict[str, Path | str],
+    output_dir: Path | str,
+    *,
+    settings: AppSettings | None = None,
+    voice_adapter: VoiceStudioAdapter | None = None,
+    cancellation_token: CancellationToken | None = None,
+    narration_audio_map: dict[str, Path | str] | None = None,
+    ffmpeg_path: Path | str | None = None,
+    work_dir: Path | str | None = None,
+) -> list[RenderResult]:
+    """Render all outputs defined in a project JSON specification.
+    
+    Guarantees input project_data is completely unchanged.
+    """
+    if cancellation_token:
+        cancellation_token.check_cancelled()
+
+    # Invariant: JSON unchanged
+    json_snapshot = json.dumps(project_data, sort_keys=True)
+
+    outputs = project_data.get("outputs", [])
+    if not outputs:
+        raise RenderError("Project data contains no outputs to render.")
+
+    results: list[RenderResult] = []
+    for out_def in outputs:
+        res = render_output(
+            output_def=out_def,
+            source_paths=source_paths,
+            output_dir=output_dir,
+            settings=settings,
+            voice_adapter=voice_adapter,
+            cancellation_token=cancellation_token,
+            narration_audio_map=narration_audio_map,
+            ffmpeg_path=ffmpeg_path,
+            work_dir=work_dir,
+        )
+        results.append(res)
+
+    # Invariant verification: JSON unchanged
+    if json.dumps(project_data, sort_keys=True) != json_snapshot:
+        raise RenderError("Input project JSON was mutated during render_project execution!")
+
+    return results

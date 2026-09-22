@@ -1,0 +1,172 @@
+"""Error hierarchy for toolrecap_v4."""
+
+from __future__ import annotations
+
+from typing import Optional
+
+
+class ToolRecapError(Exception):
+    """Base exception for all toolrecap_v4 errors."""
+
+
+class ValidationError(ToolRecapError):
+    """Base exception for validation failures."""
+
+
+class SchemaValidationError(ValidationError):
+    """Raised when JSON schema validation fails."""
+
+
+JSON_SOURCE_NOT_FOUND = "JSON_SOURCE_NOT_FOUND"
+
+
+class JsonSourceNotFoundError(SchemaValidationError):
+    """Raised when a source file in JSON is not found in actual source mapping or exact basename mismatch."""
+
+    code: str = JSON_SOURCE_NOT_FOUND
+    category: str = JSON_SOURCE_NOT_FOUND
+
+    def __init__(
+        self,
+        message: str,
+        category: str = JSON_SOURCE_NOT_FOUND,
+        code: str = JSON_SOURCE_NOT_FOUND,
+    ) -> None:
+        super().__init__(message)
+        self.category = category
+        self.code = code
+
+
+SourceNotFoundError = JsonSourceNotFoundError
+
+
+class SourceChangedError(ValidationError):
+    """Raised when source video file has been modified since project creation."""
+
+
+class WindowsNameError(ValidationError):
+    """Base exception for Windows naming and filesystem constraints."""
+
+
+class WindowsReservedNameError(WindowsNameError):
+    """Raised when a name or title matches Windows reserved device names."""
+
+
+class WindowsCollisionError(WindowsNameError):
+    """Raised when names or identifiers collide under case-folding."""
+
+
+class InvalidCharacterError(WindowsNameError):
+    """Raised when invalid Windows filename characters are detected."""
+
+
+class DuplicateIdError(ValidationError):
+    """Raised when duplicate IDs are found within the same scope."""
+
+
+class TimestampBoundaryError(ValidationError):
+    """Raised when timestamps are invalid, non-finite, out of order, or exceed duration."""
+
+
+class NarrationFitError(ValidationError):
+    """Raised when narration duration exceeds visual segment duration.
+    
+    Fit policy is defined as a technical error; trimming or altering
+    editorial clips is strictly prohibited.
+    """
+
+
+class DiscoveryError(ToolRecapError):
+    """Raised when source discovery fails."""
+
+
+class CancelledError(ToolRecapError):
+    """Raised when an operation is cancelled."""
+
+
+class PersistenceError(ToolRecapError):
+    """Base exception for storage and persistence failures."""
+
+
+class SecretExposureError(PersistenceError):
+    """Raised when an attempt is made to store secrets in project state."""
+
+
+class DPAPIError(PersistenceError):
+    """Raised when Windows DPAPI operation fails or DPAPI is unavailable."""
+
+
+class SecretStorageError(ToolRecapError):
+    """Raised when secret storage operation fails."""
+
+
+class GatewayError(ToolRecapError):
+    """Base exception for AI Gateway client failures."""
+
+
+class ModelCapabilityError(GatewayError):
+    """Raised when model lacks advertised capability (e.g. videoInput)."""
+
+
+class UnsupportedMediaError(GatewayError):
+    """Raised when media format, container or size fails without preprocessing."""
+
+
+class GatewayResponseError(GatewayError):
+    """Raised when Gateway returns an error or malformed response."""
+
+    def __init__(self, message: str, raw_response: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.raw_response = raw_response
+
+
+class InvalidGatewayResponseError(GatewayResponseError):
+    """Raised when Gateway response cannot be parsed as JSON."""
+
+
+class VoiceStudioError(ToolRecapError):
+    """Base exception for VoiceStudio adapter failures."""
+
+
+class VoiceStudioUnavailableError(VoiceStudioError):
+    """Raised when VoiceStudio (local and/or remote) is unavailable."""
+
+
+class InvalidAudioError(VoiceStudioError):
+    """Raised when synthesized audio fails WAV verification or duration check."""
+
+
+class UpdaterError(ToolRecapError):
+    """Base exception for updater failures."""
+
+
+class UpdateNotConfiguredError(UpdaterError):
+    """Raised when updater repository is not configured."""
+
+
+class UpdateCheckError(UpdaterError):
+    """Raised when checking for updates fails."""
+
+
+class UpdateVerificationError(UpdaterError):
+    """Raised when update verification (checksum) fails."""
+
+
+class ChecksumMismatchError(UpdateVerificationError):
+    """Raised when update checksum does not match sha256 file."""
+
+
+class MaliciousArchiveError(UpdaterError):
+    """Raised when update archive contains traversal, symlink, or zip bomb."""
+
+
+class PackageValidationError(UpdaterError):
+    """Raised when extracted update package is missing required files or invalid marker."""
+
+
+class UpdateInProgressError(UpdaterError):
+    """Raised when an update operation is already active."""
+
+
+class UpdateApplyError(UpdaterError):
+    """Raised when applying update fails."""

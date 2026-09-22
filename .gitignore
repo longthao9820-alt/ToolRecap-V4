@@ -1,0 +1,17 @@
+.prime/
+.kilo/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+release/
+artifacts/
+*.spec
+*.log
+.env
+.env.*
+secrets/
+credentials*
