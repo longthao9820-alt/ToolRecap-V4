@@ -69,6 +69,13 @@ class AppSettings:
     scanner_max_request_bytes: int = 131_072
     scanner_repair_attempts: int = 1
 
+    # Phase 6 provider-neutral Season Planner. Empty until configured.
+    planner_model: str = ""
+    planner_reasoning: str = ""
+    planner_max_rounds: int = 3
+    planner_repair_attempts: int = 1
+    planner_max_request_bytes: int | None = None
+
     # Notifications (all defaults ON)
     notify_complete: bool = True
     notify_error: bool = True
@@ -103,6 +110,12 @@ class AppSettings:
             raise ValueError("scanner_max_request_bytes must be at least 1024")
         if self.scanner_repair_attempts < 0:
             raise ValueError("scanner_repair_attempts must be non-negative")
+        if self.planner_max_rounds < 1:
+            raise ValueError("planner_max_rounds must be at least 1")
+        if self.planner_repair_attempts < 0:
+            raise ValueError("planner_repair_attempts must be non-negative")
+        if self.planner_max_request_bytes is not None and self.planner_max_request_bytes < 1024:
+            raise ValueError("planner_max_request_bytes must be null or at least 1024")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert settings to dictionary."""
@@ -118,6 +131,10 @@ class AppSettings:
             data_copy["scanner_model"] = str(data_copy.get("gateway_sub_model") or data_copy.get("gateway_model") or "")
         if "scanner_reasoning" not in data_copy:
             data_copy["scanner_reasoning"] = str(data_copy.get("gateway_sub_reasoning") or "")
+        if "planner_model" not in data_copy:
+            data_copy["planner_model"] = str(data_copy.get("gateway_prime_model") or "")
+        if "planner_reasoning" not in data_copy:
+            data_copy["planner_reasoning"] = str(data_copy.get("gateway_prime_reasoning") or "")
         # Migrate legacy single gateway_model to dual sub/prime defaults
         if "gateway_model" in data_copy and "gateway_sub_model" not in data_copy:
             old_model = data_copy.get("gateway_model")

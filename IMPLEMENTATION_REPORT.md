@@ -1,18 +1,18 @@
-# ToolRecap V4 — Implementation & Verification Report (Phase 5 Complete Season Evidence Catalog)
+# ToolRecap V4 — Implementation & Verification Report (Phase 6 Season Planner Draft)
 
 **Date**: 2026-09-22  
-**Contract**: Phase 5 — Complete Season Evidence Catalog + Lossless Packing
+**Contract**: Phase 6 — Season Planner + AI-Requested Exact Evidence Fetch
 **Project**: ToolRecap V4  
 **Target Platform**: Windows 10/11 x64 Portable  
 **Version**: v4.0.0  
-**Phase**: Phase 5 — Complete Catalog, Packing, Checkpoint/Cache & Capacity Foundation
-**Status**: Phase 5 IMPLEMENTED; deterministic catalog tests and prior-phase regressions verified. Phase 6 has not started.
+**Phase**: Phase 6 — Editorial Planner, Exact Evidence Fetch, Bounded Sessions & Draft Checkpoint
+**Status**: Phase 6 IMPLEMENTED; deterministic Planner tests and prior-phase regressions verified. Phase 7 has not started.
 
 ---
 
 ## 1. Executive Summary & Scope
 
-This report documents the implementation and verification of **Phase 5** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`), building locally and deterministically on the accepted Phase 4 Full Evidence Store.
+This report documents the implementation and verification of **Phase 6** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`), adding the first editorial AI stage over the complete Phase 5 Catalog.
 
 ### Cumulative Progression:
 - **Phase 1 (Baseline Validated)**: Established independent V4 workspace with 215/215 tests passing, schema 3.0 immutable, Windows DPAPI secret persistence preserved.
@@ -20,6 +20,18 @@ This report documents the implementation and verification of **Phase 5** of the 
 - **Phase 3 (Source Preparation Pipeline)**: Built complete local episode discovery, stream probing, audio selection, multi-tiered dialogue extraction, bitmap OCR, audio energy gating, STT transcription orchestration, content-addressable caching, and atomic persistence.
 - **Phase 4 (Factual Scanner & Evidence Store)**: Added deterministic cue-aware chunking, lossless long-cue parts, text-only Gateway scanning, strict response validation, bounded per-chunk repair, raw-response recovery, stable application-owned Evidence IDs, dependency-aware evidence revisions, bounded Scanner parallelism, and a hash-verified immutable Full Episode Evidence Store.
 - **Phase 5 (Complete Season Evidence Catalog)**: Added one-to-one full-evidence projection, technical completeness ledger, deterministic IDs digest and Catalog hash, exact structural pack/unpack, capacity metrics, atomic persistence/cache, corruption recovery, and `CATALOG_READY` workflow integration with zero AI calls.
+- **Phase 6 (Season Planner Draft)**: Added verbatim raw-prompt delivery, complete Catalog transport, provider-neutral Planner configuration, exact ID/range Evidence fetch, strict two-action protocol, bounded repair/rounds, raw-response recovery, atomic session reuse, technically validated draft outputs/visual requests and `PLANNER_DRAFT_READY` workflow integration.
+
+### Exact Scope Executed in Phase 6
+
+1. `season-planner-protocol-v1` supporting only `REQUEST_EVIDENCE` and `PLANNER_DRAFT` actions.
+2. Verbatim raw Recap Prompt plus complete `season-catalog-packed-v1`, ordered episode mapping, durations and active identities in every Planner round.
+3. Exact ID/range retrieval from Full Evidence with Catalog membership, project/revision, source/episode and detail-hash verification; no fuzzy or top-K search.
+4. AI-decided proposed output count, ordered draft concepts, cross-episode support, secondary-character/subplot freedom and technically validated Phase 7 visual range requests.
+5. Bounded Planner rounds and bounded technical repair; actual serialized request byte preflight with `UNKNOWN`/`FIT`/capacity failure behavior.
+6. Atomic Planner session, raw response, round, evidence-fetch and draft checkpoints with restart reuse and raw-response crash recovery.
+7. Workflow advances from `CATALOG_READY` through Planner rounds to `PLANNER_DRAFT_READY`, then stops before Phase 7.
+8. Explicit exclusions: no frame extraction, general image Gateway, visual Evidence, locked `season_plan.json`, canonical `out_###` IDs, Output Writer, Final JSON, voice or render.
 
 ### Exact Scope Executed in Phase 5
 
@@ -90,13 +102,16 @@ This report documents the implementation and verification of **Phase 5** of the 
 | **Memory Boundedness** | `ENFORCED` | Audio energy reads 4096-frame chunks; no full WAV in memory. Image OCR operates on bounded subtitle crops, never full video frames. |
 | **Stream Indexing Integrity** | `ENFORCED` | `AudioSelection` maintains separate `global_index` and `audio_ordinal`. Error raised if map spec requested on missing audio. |
 | **Editorial Independence** | `CLEAN` | No editorial policy classes, cue-capping heuristics, or arbitrary time clamping injected into analysis/preparation. |
-| **Controlled Workflow Boundary**| `VERIFIED` | Configured analysis reaches `ProjectStatus.CATALOG_READY` and stops before Phase 6; an unconfigured fresh install stops explicitly at `PREPARED`. |
+| **Controlled Workflow Boundary**| `VERIFIED` | Fully configured analysis reaches `ProjectStatus.PLANNER_DRAFT_READY` and stops before Phase 7; missing Planner configuration stops explicitly at `CATALOG_READY`. |
 | **Scanner Editorial Isolation** | `VERIFIED` | Scanner receives no Recap Prompt, application ranking policy, candidate logic, output quota, video, whole audio, or arbitrary local path. |
 | **Stable Evidence Identity** | `VERIFIED` | IDs are application-owned, deterministic after sorted validated chunk artifacts, and scoped by project + evidence revision. |
 | **Full Evidence Retention** | `VERIFIED` | Range queries return every overlap in deterministic order; no top-K, fuzzy dedupe, story ranking, or character/subplot filtering. |
 | **Complete Catalog Coverage** | `VERIFIED` | Every complete episode and every active Evidence ID is represented exactly once; zero-Evidence complete episodes remain explicit. |
 | **Lossless Packing** | `VERIFIED` | Strict pack/unpack equality preserves complete canonical Catalog content, including Unicode and long observations. |
 | **Zero-AI Catalog** | `VERIFIED` | Catalog build, packing, capacity measurement and cache reuse are entirely local and invoke no Gateway API. |
+| **Verbatim Planner Prompt** | `VERIFIED` | Raw Recap Prompt survives JSON transport exactly, including Unicode, newlines, quotes and unusual spacing. |
+| **Exact Evidence Fetch** | `VERIFIED` | Only exact IDs/ranges are accepted; Full Evidence detail hashes and complete range overlap results are verified. |
+| **No App Editorial Scoring** | `VERIFIED` | Output count/order/story/character/subplot decisions remain AI-owned; no scoring, fixed quota or application reranking exists. |
 | **Zero-AI Render Bypass** | `PRESERVED` | Projects with Final JSON execute render with exactly 0 source prep and 0 Gateway calls. |
 | **DPAPI Entropy** | `PRESERVED` | `OPTIONAL_ENTROPY = b"ToolRecapV3_DPAPI_SecretStorage_v1"` retained intact. |
 | **Schema Version** | `PRESERVED` | Schema 3.0 (`recap_v3_schema.json`) immutable. |
@@ -113,7 +128,7 @@ All validation suites executed and passed cleanly:
   - Result: 100% clean compilation across all modules and tests, 0 syntax or compilation errors.
 - **Module Import Verification**:
   - Command: `pkgutil.walk_packages` across `toolrecap_v4`
-  - Result: All 49 submodules cleanly imported without error.
+  - Result: All 63 current submodules cleanly imported without error after Phase 6.
 - **Full Pytest Suite**:
   - Command: `pytest --basetemp="C:\Users\Long\AppData\Local\Temp\kilo\pytest_v4_phase3_run"`
    - Phase 2 baseline: **237 passed**.
@@ -123,6 +138,8 @@ All validation suites executed and passed cleanly:
 - Phase 4 focused coverage: **47 Scanner/Evidence/Workflow/settings tests** across the five new test modules plus two Scanner settings tests in `test_settings.py`.
 - Phase 5 final full suite: **416 passed in 50.19s**, 0 failures, 0 errors, 0 skipped.
 - Phase 5 focused coverage: **33 Catalog/packing/store tests** plus updated workflow bypass and `CATALOG_READY` integration assertions.
+- Phase 6 final full suite: **453 passed in 51.05s**, 0 failures, 0 errors, 0 skipped.
+- Phase 6 focused coverage: **35 Planner protocol/fetch/service tests**, two Planner settings tests, and updated workflow boundary/bypass assertions.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
   - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
@@ -164,12 +181,20 @@ All validation suites executed and passed cleanly:
 - `tests/test_workflow_scanner.py`: source prep → Scanner → Evidence → Catalog → `CATALOG_READY`, Catalog reuse after restart, zero extra Gateway calls, and explicit stop before Phase 6.
 - `tests/test_workflow_source_prep.py`: imported Final JSON bypass now explicitly asserts Catalog is never invoked.
 
+### Phase 6 test modules
+
+- `tests/test_planner_protocol.py`: verbatim prompt, complete Catalog membership, strict identities/actions, AI-decided output count, cross-episode drafts, draft refs and visual range validation.
+- `tests/test_planner_evidence_fetch.py`: exact ID/range retrieval, overlap completeness, deterministic order, invalid/stale/malformed requests and detail-hash failure.
+- `tests/test_planner_service.py`: immediate/multi-round drafts, round limits, bounded repair, raw recovery, completed fetch reuse, dependency invalidation, capacity, cancellation and no final lock.
+- `tests/test_workflow_scanner.py`: `PLANNER_DRAFT_READY` boundary and raw prompt handoff.
+- `tests/test_workflow_source_prep.py`: imported Final JSON bypass explicitly asserts Planner is never invoked.
+
 ---
 
-## 4. Explicit Limitations & Boundaries (Phase 6+ Scope)
+## 4. Explicit Limitations & Boundaries (Phase 7+ Scope)
 
 - **General scene Vision**: NOT implemented. Phase 4 is transcript/factual-text only; Phase 3 bitmap subtitle Vision OCR remains crop-restricted.
-- **Season Planner and AI Evidence Fetch**: NOT implemented. Workflow stops at `ProjectStatus.CATALOG_READY` before Phase 6.
+- **Selective general Vision and final plan lock**: NOT implemented. Workflow stops at `ProjectStatus.PLANNER_DRAFT_READY` before Phase 7; no `season_plan.json` or canonical `out_###` IDs exist.
 - **Output Writers & Output Directory Resolver**: NOT implemented. Final JSON generation currently only accepts imported/pre-existing schemas.
 - **Executable Packaging**: Portable binary packaging via `build_portable.py` / PyInstaller was not run; no `dist/ToolRecapV4.exe` exists in this phase.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.

@@ -1,13 +1,13 @@
-# Hướng dẫn sử dụng ToolRecap V4 (Phase 5 Complete Season Evidence Catalog)
+# Hướng dẫn sử dụng ToolRecap V4 (Phase 6 Season Planner Draft)
 
 ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tóm tắt và dựng video recap từ video nguồn.
 
 ---
 
-## 1. Trạng thái hiện tại: Phase 5 Complete Season Evidence Catalog
+## 1. Trạng thái hiện tại: Phase 6 Season Planner + Exact Evidence Fetch
 
 > **LƯU Ý TRUNG THỰC VỀ TIẾN ĐỘ & BẢN DỰNG:**
-> Hiện tại dự án đã hoàn thành **Phase 5 (Complete Season Evidence Catalog & Lossless Packing)**:
+> Hiện tại dự án đã hoàn thành **Phase 6 (Season Planner Draft & Exact Full Evidence Fetch)**:
 > - **Hệ thống chuẩn bị nguồn cục bộ hoàn chỉnh**: Mô-đun `toolrecap_v4.analysis` xử lý trích xuất phụ đề, bóc tách âm thanh, nhận diện tiếng nói và lưu trữ tạo tác chuẩn bị có kiểm soát chất lượng.
 > - **Thứ tự ưu tiên trích xuất hội thoại nghiêm ngặt**:
 >   1. Phụ đề rời tiếng Anh (Sidecar text: SRT, VTT, ASS) với khả năng làm sạch thẻ định dạng.
@@ -37,11 +37,22 @@ ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tó
 >   - `unpack(pack(catalog)) == catalog`; không cắt text, bỏ Evidence, bỏ episode hoặc thay Unicode.
 >   - Đo actual canonical/packed UTF-8 bytes. Không có explicit capacity profile thì trạng thái trung thực là `UNKNOWN`; nếu có thì chỉ báo `FIT` hoặc `EXCEEDS_CONFIGURED_LIMIT`, không bỏ dữ liệu.
 >   - Catalog và packed artifact được lưu atomic, hash-verified và reuse khi evidence dependencies không đổi.
+> - **Season Planner — editorial AI stage đầu tiên**:
+>   - Raw Recap Prompt được đưa vào Planner nguyên văn, cùng complete packed Catalog, canonical episode mapping, durations, Catalog hash và Evidence revision.
+>   - Planner tự quyết định output count, story arcs, cross-episode connections, secondary-character/subplot coverage; ứng dụng không chấm điểm hoặc xếp hạng story.
+>   - Planner protocol chỉ chấp nhận `REQUEST_EVIDENCE` hoặc `PLANNER_DRAFT`, với validation identity/schema nghiêm ngặt và bounded technical repair.
+> - **Exact Full Evidence Fetch**:
+>   - Planner chỉ được yêu cầu exact Evidence IDs hoặc exact episode millisecond ranges.
+>   - ID/range sai bị reject, không fuzzy match hoặc clamp. Range fetch trả toàn bộ Evidence overlap và explicit completeness metadata.
+>   - Full Evidence được lấy từ authoritative Evidence Store và kiểm detail hash với Catalog trước khi gửi lại Planner.
+> - **Planner session/resume**:
+>   - Planner rounds hữu hạn, raw response được lưu bounded trước validation, completed rounds/evidence fetch/draft được checkpoint atomic và reuse sau restart.
+>   - Capacity preflight đo serialized request bytes thực; unknown capacity giữ `UNKNOWN`, explicit overflow dừng mà không bỏ Catalog/Evidence.
 > - **Workflow kiểm soát chặt chẽ**:
 >   - Khi dự án đã có Final JSON hợp lệ hoặc được import từ trước: chạy thẳng vào luồng dựng (render), thực hiện chính xác 0 lượt gọi Gateway và 0 lượt chạy chuẩn bị nguồn.
->   - Khi chưa có Final JSON và Scanner model đã cấu hình: source preparation → factual Scanner → Evidence Store → Complete Catalog → trạng thái `CATALOG_READY`, sau đó dừng có kiểm soát trước Phase 6.
+>   - Khi Scanner và Planner model đã cấu hình: source preparation → Scanner → Evidence Store → Catalog → Planner/fetch rounds → `PLANNER_DRAFT_READY`, sau đó dừng trước Phase 7.
 >   - Fresh install chưa cấu hình Scanner model dừng rõ ràng ở `PREPARED`; ID model là free text, provider-neutral. Settings cũ được migrate nguyên literal từ `gateway_sub_model`.
-> - **CHƯA CÓ CÁC TÍNH NĂNG PHASE 6+**: Season Planner, AI Evidence Fetch, Season Editorial Plan, general scene Vision, Output Writers và Final JSON generation CHƯA được triển khai. Phase 3 Vision OCR vẫn chỉ dùng crop phụ đề bitmap.
+> - **CHƯA CÓ CÁC TÍNH NĂNG PHASE 7+**: selective general Vision, locked final Season Plan, canonical `out_###` IDs, Output Writers và Final JSON generation CHƯA được triển khai. Phase 3 Vision OCR vẫn chỉ dùng crop phụ đề bitmap.
 > - **CHƯA CÓ BẢN DỰNG EXE**: Chưa chạy đóng gói `build_portable.py` / PyInstaller; chưa có tệp `ToolRecapV4.exe` trong `dist/` hoặc bản nén trong `release/`.
 > - **MỤC TIÊU CẬP NHẬT CHƯA XÁC MINH PHÁT HÀNH**: Cấu hình kho cập nhật đích `longthao9820-alt/ToolRecap-V4` là định danh cấu hình, chưa có bản release thực tế trên remote.
 
@@ -95,6 +106,7 @@ Tất cả dữ liệu làm việc, cấu hình và tệp tạm được lưu ri
 - `projects/<project_id>/scanner/<revision>/`: Raw response có giới hạn, chunk Scanner đã validate và manifest hash-verified.
 - `projects/<project_id>/evidence/<revision>/`: Full Episode Evidence immutable và revision manifest atomic.
 - `projects/<project_id>/catalog/<catalog-hash-prefix>/<packing-version-hash>/`: canonical Catalog, packed Catalog và COMPLETE manifest; `catalog/active.json` là dependency-verified checkpoint pointer.
+- `projects/<project_id>/planning/<planner-session-id>/`: Planner session, bounded raw responses, round/fetch manifests và `planner_draft.json`; không có locked `season_plan.json`.
 - `cache/analysis/`: Bộ nhớ đệm phân tích và trích xuất phụ đề/âm thanh content-addressable.
 - `sub_analysis/`: Checkpoint phân tích (`sub_analysis/<mã_dự_án>.txt`).
 - `final/`: Kịch bản Final JSON (`final/<mã_dự_án>.json`).

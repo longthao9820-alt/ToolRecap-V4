@@ -1,4 +1,4 @@
-"""Phase 5 deterministic catalog facilities; no Planner implementation lives here."""
+"""Staged Finalizer foundations through the Phase 6 Planner Draft boundary."""
 
 from .catalog import (
     CATALOG_PROJECTION_VERSION,
@@ -18,12 +18,30 @@ from .catalog import (
 )
 from .catalog_store import CatalogBuildResult, CatalogService, CatalogStore
 from .packing import PACKING_VERSION, pack_catalog, packed_catalog_bytes, unpack_catalog
+from .evidence_fetch import EVIDENCE_FETCH_PROTOCOL_VERSION, EvidenceFetchResult, EvidenceFetcher, EvidenceRequest
+from .planner import (
+    PLANNER_DRAFT_VERSION,
+    PLANNER_PROTOCOL_VERSION,
+    DraftOutput,
+    PlannerAction,
+    PlannerDraft,
+    VisualRangeRequest,
+    build_initial_planner_prompt,
+    planner_dependency_signature,
+    validate_planner_action,
+)
+from .planner_service import PlannerConfig, PlannerRunResult, PlannerService
 
 __all__ = [
     "CATALOG_PROJECTION_VERSION",
     "CATALOG_VERSION",
     "PACKING_VERSION",
     "CapacityPreflight",
+    "DraftOutput",
+    "EVIDENCE_FETCH_PROTOCOL_VERSION",
+    "EvidenceFetchResult",
+    "EvidenceFetcher",
+    "EvidenceRequest",
     "CatalogBuildResult",
     "CatalogBuilder",
     "CatalogCompleteness",
@@ -31,6 +49,13 @@ __all__ = [
     "CatalogItem",
     "CatalogService",
     "CatalogStore",
+    "PLANNER_DRAFT_VERSION",
+    "PLANNER_PROTOCOL_VERSION",
+    "PlannerAction",
+    "PlannerConfig",
+    "PlannerDraft",
+    "PlannerRunResult",
+    "PlannerService",
     "SeasonEvidenceCatalog",
     "canonical_catalog_bytes",
     "catalog_detail_hash",
@@ -41,4 +66,8 @@ __all__ = [
     "unpack_catalog",
     "validate_catalog",
     "verify_catalog_against_evidence",
+    "VisualRangeRequest",
+    "build_initial_planner_prompt",
+    "planner_dependency_signature",
+    "validate_planner_action",
 ]

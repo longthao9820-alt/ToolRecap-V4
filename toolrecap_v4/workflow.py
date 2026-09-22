@@ -30,7 +30,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from toolrecap_v4.analysis.cache import AnalysisCacheManager
-from toolrecap_v4.analysis.finalizer import CatalogService
+from toolrecap_v4.analysis.finalizer import CatalogService, PlannerConfig, PlannerService
 from toolrecap_v4.analysis.models import PreparedEpisode
 from toolrecap_v4.analysis.scanner import ScannerChunkPolicy, ScannerConfig, ScannerService
 from toolrecap_v4.analysis.source_prep.pipeline import SourcePreparationPipeline
@@ -81,6 +81,7 @@ class ProjectStatus(str, enum.Enum):
     PREPARED = "prepared"
     EVIDENCE_READY = "evidence_ready"
     CATALOG_READY = "catalog_ready"
+    PLANNER_DRAFT_READY = "planner_draft_ready"
     RENDERING = "rendering"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -122,6 +123,7 @@ class WorkflowCallbacks:
     on_episode_prepared: Optional[Callable[[str, Dict[str, Any]], None]] = None
     on_evidence_ready: Optional[Callable[[str, Dict[str, int]], None]] = None
     on_catalog_ready: Optional[Callable[[str, Dict[str, Any]], None]] = None
+    on_planner_draft_ready: Optional[Callable[[str, Dict[str, Any]], None]] = None
 
 
 def resolve_sources(
@@ -323,7 +325,14 @@ def reconcile_project_state(
             except PersistenceError:
                 catalog_checkpoint = None
             if catalog_checkpoint and catalog_checkpoint.get("status") == "completed":
-                project_state["status"] = ProjectStatus.CATALOG_READY.value
+                try:
+                    planner_checkpoint = persistence.load_checkpoint(project_id, "planner_draft")
+                except PersistenceError:
+                    planner_checkpoint = None
+                if planner_checkpoint and planner_checkpoint.get("status") == "completed":
+                    project_state["status"] = ProjectStatus.PLANNER_DRAFT_READY.value
+                else:
+                    project_state["status"] = ProjectStatus.CATALOG_READY.value
             elif evidence_checkpoint and evidence_checkpoint.get("status") == "completed":
                 project_state["status"] = ProjectStatus.EVIDENCE_READY.value
             elif persistence.has_prepared_manifest(project_id):
@@ -351,6 +360,7 @@ class ProjectWorkflow:
         source_preparation_pipeline: Optional[SourcePreparationPipeline] = None,
         scanner_service: Optional[ScannerService] = None,
         catalog_service: Optional[CatalogService] = None,
+        planner_service: Optional[PlannerService] = None,
     ) -> None:
         self.persistence = persistence or ProjectPersistence(storage_root=storage_root)
         self.settings_manager = settings_manager or SettingsManager(persistence=self.persistence)
@@ -359,6 +369,7 @@ class ProjectWorkflow:
         self.source_preparation_pipeline = source_preparation_pipeline
         self.scanner_service = scanner_service
         self.catalog_service = catalog_service
+        self.planner_service = planner_service
 
     def create_project(
         self,
@@ -876,10 +887,75 @@ class ProjectWorkflow:
                     callbacks.on_catalog_ready(catalog_result.catalog.catalog_hash, catalog_summary)
                 if callbacks and callbacks.on_status_change:
                     callbacks.on_status_change(ProjectStatus.CATALOG_READY.value)
-                phase6_err = AnalysisPipelineUnavailableError(phase6_msg)
+
+                planner_service = self.planner_service
+                if planner_service is None and cfg.planner_model.strip():
+                    planner_service = PlannerService(
+                        gateway_client=self.gateway_client,
+                        storage_root=self.persistence.root,
+                        config=PlannerConfig(
+                            model=cfg.planner_model,
+                            reasoning=cfg.planner_reasoning,
+                            max_rounds=cfg.planner_max_rounds,
+                            repair_attempts=cfg.planner_repair_attempts,
+                            max_request_bytes=cfg.planner_max_request_bytes,
+                        ),
+                    )
+                if planner_service is None:
+                    phase6_err = AnalysisPipelineUnavailableError(phase6_msg)
+                    if callbacks and callbacks.on_error:
+                        callbacks.on_error(phase6_err, None)
+                    raise phase6_err
+
+                try:
+                    planner_result = planner_service.run(
+                        project_id=project_id,
+                        raw_recap_prompt=state.get("prompt", ""),
+                        catalog=catalog_result.catalog,
+                        cancellation_token=cancellation_token,
+                    )
+                except CancelledError:
+                    raise
+                except Exception as exc:
+                    state["status"] = ProjectStatus.FAILED.value
+                    state["error"] = f"Season Planner failed: {exc}"
+                    now_err = datetime.now(timezone.utc).isoformat()
+                    state.setdefault("timestamps", {})["failed_at"] = now_err
+                    state["timestamps"]["updated_at"] = now_err
+                    self.persistence.save_project(state)
+                    if callbacks and callbacks.on_status_change:
+                        callbacks.on_status_change(ProjectStatus.FAILED.value)
+                    if callbacks and callbacks.on_error:
+                        callbacks.on_error(exc, None)
+                    raise
+
+                draft_summary = {
+                    "status": "completed",
+                    "session_id": planner_result.session_id,
+                    "dependency_digest": planner_result.dependency_digest,
+                    "round_count": planner_result.round_count,
+                    "proposed_output_count": planner_result.draft.proposed_output_count,
+                    "draft_path": str(planner_result.draft_path),
+                    "reused": planner_result.reused,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }
+                self.persistence.save_checkpoint(project_id, "planner_draft", draft_summary)
+                now_draft = datetime.now(timezone.utc).isoformat()
+                phase7_msg = "Analysis pipeline stopped: Planner Draft is ready (PLANNER_DRAFT_READY); Phase 7 selective visual evidence is not implemented."
+                state["status"] = ProjectStatus.PLANNER_DRAFT_READY.value
+                state["planner_draft"] = draft_summary
+                state["error"] = phase7_msg
+                state.setdefault("timestamps", {})["planner_draft_ready_at"] = now_draft
+                state["timestamps"]["updated_at"] = now_draft
+                self.persistence.save_project(state)
+                if callbacks and callbacks.on_planner_draft_ready:
+                    callbacks.on_planner_draft_ready(planner_result.session_id, draft_summary)
+                if callbacks and callbacks.on_status_change:
+                    callbacks.on_status_change(ProjectStatus.PLANNER_DRAFT_READY.value)
+                phase7_err = AnalysisPipelineUnavailableError(phase7_msg)
                 if callbacks and callbacks.on_error:
-                    callbacks.on_error(phase6_err, None)
-                raise phase6_err
+                    callbacks.on_error(phase7_err, None)
+                raise phase7_err
 
             # Step 2: Source integrity check (source changes fail no substitution)
             verify_source_integrity(state["source_fingerprints"], cancellation_token=cancellation_token)

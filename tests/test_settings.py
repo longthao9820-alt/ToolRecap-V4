@@ -113,3 +113,16 @@ def test_legacy_scanner_settings_migrate_provider_neutrally():
 def test_fresh_scanner_model_is_not_vendor_hardcoded():
     settings = AppSettings()
     assert settings.scanner_model == ""
+
+
+def test_legacy_planner_settings_migrate_provider_neutrally():
+    settings = AppSettings.from_dict({
+        "gateway_prime_model": "literal-planner-route",
+        "gateway_prime_reasoning": "high",
+    })
+    assert settings.planner_model == "literal-planner-route"
+    assert settings.planner_reasoning == "high"
+
+
+def test_fresh_planner_model_is_not_vendor_hardcoded():
+    assert AppSettings().planner_model == ""

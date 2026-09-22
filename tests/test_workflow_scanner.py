@@ -7,6 +7,7 @@ import pytest
 
 from toolrecap_v4.analysis.models import PreparedEpisode, Transcript, TranscriptCue
 from toolrecap_v4.analysis.scanner import ScannerChunkPolicy, ScannerConfig, ScannerService
+from toolrecap_v4.analysis.finalizer import PlannerDraft, PlannerRunResult
 from toolrecap_v4.discovery import compute_file_fingerprint
 from toolrecap_v4.errors import AnalysisPipelineUnavailableError
 from toolrecap_v4.gateway import GatewayResult
@@ -98,3 +99,26 @@ def test_workflow_reaches_catalog_ready_and_stops_before_phase6(tmp_path):
     assert resumed["status"] == ProjectStatus.CATALOG_READY.value
     assert resumed["catalog"]["reused"] is True
     assert len(gateway.calls) == gateway_call_count
+
+    class PlannerStub:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, **kwargs):
+            self.calls.append(kwargs)
+            draft_path = tmp_path / "storage" / "projects" / "project-1" / "planning" / "stub" / "planner_draft.json"
+            return PlannerRunResult(
+                project_id="project-1", session_id="planner-stub", dependency_digest="dep",
+                draft=PlannerDraft("planner-draft-v1", "Rationale", 0, (), ()),
+                round_count=1, request_measurements=(), reused=False, draft_path=draft_path,
+            )
+
+    planner = PlannerStub()
+    workflow.planner_service = planner
+    with pytest.raises(AnalysisPipelineUnavailableError, match="Phase 7"):
+        workflow.resume_project("project-1")
+    planned = persistence.load_project("project-1")
+    assert planned["status"] == ProjectStatus.PLANNER_DRAFT_READY.value
+    assert planned["planner_draft"]["proposed_output_count"] == 0
+    assert planner.calls[0]["raw_recap_prompt"] == "THIS CREATIVE PROMPT MUST NEVER ENTER SCANNER"
+    assert planner.calls[0]["catalog"].catalog_hash == planned["catalog"]["catalog_hash"]

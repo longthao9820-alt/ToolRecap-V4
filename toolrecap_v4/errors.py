@@ -163,6 +163,63 @@ class CatalogCapacityError(CatalogError):
     """Raised for invalid explicit Catalog capacity configuration."""
 
 
+class PlannerError(ToolRecapError):
+    """Base exception for Season Planner failures with round context."""
+
+    def __init__(self, message: str, *, project_id: str | None = None, round_id: str | None = None) -> None:
+        super().__init__(message)
+        self.project_id = project_id
+        self.round_id = round_id
+
+
+class PlannerCapacityError(PlannerError):
+    """Raised when a complete Planner request exceeds explicit or upstream capacity."""
+
+
+class PlannerProtocolError(PlannerError):
+    """Raised for an unsupported Planner protocol or action."""
+
+
+class PlannerResponseError(PlannerError):
+    """Raised when Planner output cannot be parsed as a structured response."""
+
+
+class PlannerValidationError(PlannerProtocolError):
+    """Raised when structured Planner output violates the technical contract."""
+
+    def __init__(self, message: str, *, issue_codes: tuple[str, ...] = (), **context: object) -> None:
+        super().__init__(message, **context)
+        self.issue_codes = issue_codes
+
+
+class PlannerRepairExhaustedError(PlannerError):
+    """Raised when bounded technical repair cannot validate a Planner round."""
+
+
+class PlannerRoundLimitError(PlannerError):
+    """Raised when Planner asks for more evidence after the final allowed round."""
+
+
+class PlannerEvidenceRequestError(PlannerError):
+    """Base exception for invalid exact Evidence requests."""
+
+
+class PlannerEvidenceNotFoundError(PlannerEvidenceRequestError):
+    """Raised for an unknown or malformed requested Evidence ID."""
+
+
+class PlannerEvidenceRevisionError(PlannerEvidenceRequestError):
+    """Raised when a request targets a stale Evidence revision."""
+
+
+class PlannerEvidenceIntegrityError(PlannerEvidenceRequestError):
+    """Raised when Catalog detail identity disagrees with Full Evidence."""
+
+
+class PlannerSessionError(PlannerError):
+    """Raised for Planner checkpoint persistence or resume failures."""
+
+
 class CancelledError(ToolRecapError):
     """Raised when an operation is cancelled."""
 
