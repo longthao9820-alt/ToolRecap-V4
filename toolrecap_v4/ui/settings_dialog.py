@@ -645,6 +645,7 @@ class SettingsDialog(tk.Toplevel):
             self.key_entry.configure(show="" if self.var_gw_key_visible.get() else "●")
 
     def _test_sub_connection(self) -> None:
+        """Test Sub model connection using provider-neutral model availability check (transitional)."""
         endpoint = self.var_gw_endpoint.get().strip()
         model = self.var_gw_sub_model.get().strip()
         key_input = self.var_gw_key.get()
@@ -661,7 +662,8 @@ class SettingsDialog(tk.Toplevel):
             try:
                 validate_url_no_credentials(endpoint, "Gateway Endpoint")
                 client = GatewayClient(base_url=endpoint, api_key=api_key or None, timeout=8.0)
-                client.validate_model_video_capability(model)
+                # Transitional: provider-neutral availability check, no video assumption
+                client.validate_model_availability(model)
                 self.after(0, lambda: (
                     self.sub_status_var.set(f"✓ Sub model hoạt động — {model} sẵn sàng."),
                     self.lbl_sub_test_result.config(foreground="#16A34A"),
@@ -675,6 +677,7 @@ class SettingsDialog(tk.Toplevel):
         threading.Thread(target=_work, daemon=True).start()
 
     def _test_prime_connection(self) -> None:
+        """Test Prime model connection using provider-neutral model availability check (transitional)."""
         endpoint = self.var_gw_endpoint.get().strip()
         model = self.var_gw_prime_model.get().strip()
         key_input = self.var_gw_key.get()
@@ -691,7 +694,8 @@ class SettingsDialog(tk.Toplevel):
             try:
                 validate_url_no_credentials(endpoint, "Gateway Endpoint")
                 client = GatewayClient(base_url=endpoint, api_key=api_key or None, timeout=8.0)
-                client.validate_model_prime_capability(model)
+                # Transitional: provider-neutral availability check, no video assumption
+                client.validate_model_availability(model)
                 self.after(0, lambda: (
                     self.prime_status_var.set(f"✓ Prime model hoạt động — {model} sẵn sàng."),
                     self.lbl_prime_test_result.config(foreground="#16A34A"),

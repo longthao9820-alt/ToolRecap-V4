@@ -39,6 +39,7 @@ from toolrecap_v4.discovery import (
     natural_sort_key,
 )
 from toolrecap_v4.errors import (
+    AnalysisPipelineUnavailableError,
     CancelledError,
     DiscoveryError,
     InvalidGatewayResponseError,
@@ -557,6 +558,31 @@ class ProjectWorkflow:
         state = self.persistence.load_project(project_id)
         state = reconcile_project_state(state, self.persistence)
 
+        # Check if matching final_json exists (Resume/import NEVER Gateway once Final JSON exists)
+        final_json = state.get("final_json")
+        if final_json is None and self.persistence.has_final_json(project_id):
+            final_json = self.persistence.load_final_json(project_id)
+            state["final_json"] = final_json
+
+        if final_json is None:
+            if cancellation_token:
+                cancellation_token.check_cancelled()
+            err = AnalysisPipelineUnavailableError(
+                "Analysis pipeline is unavailable in Phase 2: whole-video analysis APIs have been removed "
+                "and replacement multimodal analysis pipeline is not configured."
+            )
+            now_iso = datetime.now(timezone.utc).isoformat()
+            state["status"] = ProjectStatus.FAILED.value
+            state["error"] = str(err)
+            state.setdefault("timestamps", {})["failed_at"] = now_iso
+            state["timestamps"]["updated_at"] = now_iso
+            self.persistence.save_project(state)
+            if callbacks and callbacks.on_status_change:
+                callbacks.on_status_change(ProjectStatus.FAILED.value)
+            if callbacks and callbacks.on_error:
+                callbacks.on_error(err, None)
+            raise err
+
         try:
             # Step 2: Source integrity check (source changes fail no substitution)
             verify_source_integrity(state["source_fingerprints"], cancellation_token=cancellation_token)
@@ -571,185 +597,11 @@ class ProjectWorkflow:
                 resolved_output_dir = Path(state.get("output_dir", self.persistence.root / "outputs" / project_id)).resolve()
                 resolved_output_dir.mkdir(parents=True, exist_ok=True)
 
-            # Step 4: Check if final_json exists (Resume/import NEVER Gateway once Final JSON exists)
-            final_json = state.get("final_json")
-            if final_json is None and self.persistence.has_final_json(project_id):
-                final_json = self.persistence.load_final_json(project_id)
-                state["final_json"] = final_json
-
-            if final_json is None:
-                # Stage 1: Sub model (whole original videos -> text analysis)
-                if cancellation_token:
-                    cancellation_token.check_cancelled()
-
-                sub_analysis = state.get("sub_analysis")
-                if not sub_analysis and self.persistence.has_sub_analysis(project_id):
-                    sub_analysis = self.persistence.load_sub_analysis(project_id)
-                    state["sub_analysis"] = sub_analysis
-
-                ordered_sources = [
-                    Path(fp["path"]).resolve()
-                    for fp in sorted(state["source_fingerprints"].values(), key=lambda x: natural_sort_key(x["basename"]))
-                ]
-                source_meta = [
-                    {
-                        "source_file": s["source_file"],
-                        "duration_ms": s.get("duration_ms"),
-                    }
-                    for s in state.get("sources", [])
-                ]
-                if not source_meta:
-                    source_meta = [{"source_file": p.name} for p in ordered_sources]
-
-                if not sub_analysis:
-                    now_iso = datetime.now(timezone.utc).isoformat()
-                    state["status"] = ProjectStatus.ANALYZING.value
-                    state["timestamps"]["analyzing_started_at"] = now_iso
-                    state["timestamps"]["updated_at"] = now_iso
-                    self.persistence.save_project(state)
-                    if callbacks and callbacks.on_status_change:
-                        callbacks.on_status_change(ProjectStatus.ANALYZING.value)
-
-                    try:
-                        sub_result = self.gateway_client.submit_chat_analysis(
-                            sources=ordered_sources,
-                            prompt=state["prompt"],
-                            model=cfg.gateway_sub_model,
-                            source_metadata=source_meta,
-                            reasoning_effort=cfg.gateway_sub_reasoning or None,
-                            expect_json=False,
-                            cancellation_token=cancellation_token,
-                        )
-                        sub_analysis = sub_result.raw_response
-                    except CancelledError:
-                        raise
-                    except InvalidGatewayResponseError as e:
-                        raw_sub = getattr(e, "raw_response", None)
-                        if raw_sub:
-                            self.persistence.save_raw_response(project_id, raw_sub)
-                            state["raw_response"] = raw_sub
-                        state["status"] = ProjectStatus.FAILED.value
-                        state["error"] = str(e)
-                        state["timestamps"]["failed_at"] = datetime.now(timezone.utc).isoformat()
-                        self.persistence.save_project(state)
-                        if callbacks and callbacks.on_error:
-                            callbacks.on_error(e, raw_sub)
-                        raise
-                    except Exception as e:
-                        state["status"] = ProjectStatus.FAILED.value
-                        state["error"] = str(e)
-                        state["timestamps"]["failed_at"] = datetime.now(timezone.utc).isoformat()
-                        self.persistence.save_project(state)
-                        if callbacks and callbacks.on_error:
-                            callbacks.on_error(e, None)
-                        raise
-
-                    # PERSIST rawSub checkpoint BEFORE Prime!
-                    self.persistence.save_sub_analysis(project_id, sub_analysis)
-                    state["sub_analysis"] = sub_analysis
-                    now_sub_iso = datetime.now(timezone.utc).isoformat()
-                    state["timestamps"]["sub_analyzed_at"] = now_sub_iso
-                    state["timestamps"]["updated_at"] = now_sub_iso
-                    self.persistence.save_project(state)
-                    if callbacks and callbacks.on_sub_analysis:
-                        callbacks.on_sub_analysis(sub_analysis)
-
-                # Stage 2: Prime model (text analysis + original prompt + schema -> Final JSON)
-                if cancellation_token:
-                    cancellation_token.check_cancelled()
-
-                from toolrecap_v4.schemas.schema import get_project_schema
-                technical_schema = get_project_schema()
-
-                technical_metadata = {
-                    "project_id": state["project_id"],
-                    "sources": source_meta,
-                }
-
-                prime_prompt = (
-                    f"Original User Prompt:\n{state['prompt']}\n\n"
-                    f"Technical Metadata (Exact Source Files, Durations, Project ID):\n{json.dumps(technical_metadata, indent=2, ensure_ascii=False)}\n\n"
-                    f"Video Analysis from Sub Stage:\n{sub_analysis}\n\n"
-                    f"Technical Schema:\n{json.dumps(technical_schema, indent=2, ensure_ascii=False)}\n\n"
-                    "Generate the final recap JSON matching the schema based on the video analysis and user prompt."
-                )
-
-                raw_response = None
-                try:
-                    prime_result = self.gateway_client.submit_text_chat(
-                        prompt=prime_prompt,
-                        model=cfg.gateway_prime_model,
-                        reasoning_effort=cfg.gateway_prime_reasoning or None,
-                        expect_json=True,
-                        cancellation_token=cancellation_token,
-                    )
-                    raw_response = prime_result.raw_response
-                    parsed_json = prime_result.parsed_json
-                except CancelledError:
-                    raise
-                except InvalidGatewayResponseError as e:
-                    raw_response = getattr(e, "raw_response", None)
-                    if raw_response:
-                        self.persistence.save_raw_response(project_id, raw_response)
-                        state["raw_response"] = raw_response
-                    state["status"] = ProjectStatus.FAILED.value
-                    state["error"] = str(e)
-                    state["timestamps"]["failed_at"] = datetime.now(timezone.utc).isoformat()
-                    self.persistence.save_project(state)
-                    if callbacks and callbacks.on_error:
-                        callbacks.on_error(e, raw_response)
-                    raise
-                except Exception as e:
-                    state["status"] = ProjectStatus.FAILED.value
-                    state["error"] = str(e)
-                    state["timestamps"]["failed_at"] = datetime.now(timezone.utc).isoformat()
-                    self.persistence.save_project(state)
-                    if callbacks and callbacks.on_error:
-                        callbacks.on_error(e, None)
-                    raise
-
-                # Save raw response immediately!
-                self.persistence.save_raw_response(project_id, raw_response)
-                state["raw_response"] = raw_response
-                if callbacks and callbacks.on_raw_response:
-                    callbacks.on_raw_response(raw_response)
-
-                # Validate parsed_json against actual probed source durations
-                source_durations = {
-                    s["source_file"]: s["duration_ms"]
-                    for s in state.get("sources", [])
-                }
-                try:
-                    validate_project(parsed_json, source_durations=source_durations, cancellation_token=cancellation_token)
-                except Exception as e:
-                    state["status"] = ProjectStatus.FAILED.value
-                    state["error"] = f"Validation failed: {e}"
-                    state["timestamps"]["failed_at"] = datetime.now(timezone.utc).isoformat()
-                    self.persistence.save_project(state)
-                    if callbacks and callbacks.on_error:
-                        callbacks.on_error(e, raw_response)
-                    raise
-
-                # SAVE FINAL JSON TO DISK BEFORE ANY VOICE SYNTHESIS OR RENDERING!
-                self.persistence.save_final_json(project_id, parsed_json)
-                state["final_json"] = parsed_json
-                state["status"] = ProjectStatus.ANALYZED.value
-                now_iso = datetime.now(timezone.utc).isoformat()
-                state["timestamps"]["analyzed_at"] = now_iso
-                state["timestamps"]["updated_at"] = now_iso
-                self.persistence.save_project(state)
-                if callbacks and callbacks.on_final_json:
-                    callbacks.on_final_json(parsed_json)
-                if callbacks and callbacks.on_status_change:
-                    callbacks.on_status_change(ProjectStatus.ANALYZED.value)
-
-                final_json = parsed_json
-
-            # Step 5: Check publication collision against ALL project sources (including unused)
+            # Step 4: Check publication collision against ALL project sources (including unused)
             all_source_paths = [fp["path"] for fp in state["source_fingerprints"].values()]
             check_publication_collision(final_json.get("outputs", []), resolved_output_dir, all_source_paths)
 
-            # Step 6: Render outputs sequentially
+            # Step 5: Render outputs sequentially
             if cancellation_token:
                 cancellation_token.check_cancelled()
 

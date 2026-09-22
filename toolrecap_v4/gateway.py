@@ -1,186 +1,80 @@
 """GatewayClient for 9router AI Gateway.
 
 Invariants:
-- Sends original bytes for ALL ordered sources in ONE chat request using verified image_url data video URI.
-- User prompt remains completely unchanged; technical schema/source metadata sent separately.
-- Validates advertised model video capability; explicit supported media/size limits fail without preprocessing.
-- Configured API route (/v1/chat/completions), never guessed upload routes.
-- Returns raw sanitized response and parsed JSON without editorial repair.
-- Finite cancel-aware streaming networking; retries bounded to transient errors only.
-- Credential leakage strictly prevented across all exceptions and outputs.
+- Safe provider-neutral text/JSON and explicit selected still-image transport only.
+- Production whole-video transport APIs and video capability validation are completely removed.
+- Validates genuine still JPEG/PNG via strict pre-Pillow magic bytes, formats allowlist,
+  and Pillow image decode.
+- Animated, multi-frame (GIF, APNG, multi-frame TIFF), video, and arbitrary binary formats are strictly rejected.
+- Catches Image.DecompressionBombError / DecompressionBombWarning safely and enforces limits before load.
+- Validated still images are re-encoded to clean buffers to strip ancillary, trailing, or polyglot bytes.
+- submit_text_chat is text-only (no images parameter); submit_image_chat is the sole vetted media path.
+- Enforces strict configurable positive bounds on images per request, byte sizes, dimensions, and total image bytes.
+- No raw caller request escape hatch: caller cannot supply raw messages or unverified media.
+- Measures exact serialized bytes sent over the HTTP transport.
+- Metadata is sanitized without prompts, bodies, or secrets.
+- Successful model response text is returned exact without API key redaction.
+  Sanitization applies strictly to errors, metadata, and error properties to prevent credential leakage.
+- Full error taxonomy classification: connection, timeout, 401, 403, 404, 408, 429, 5xx,
+  payload context, malformed API envelope, empty API response, model JSON defects, cancel.
+- Bounded cancellation-aware retries with capped Retry-After delays; cancellation is never retried.
+- Provider-neutral model availability check queries advertised models for every ID without name heuristics.
+- No generic 'except Exception' converting programmer defects.
 """
 
 from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+import io
 import json
-import mimetypes
 from pathlib import Path
 import re
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+import warnings
 
 import httpx
+from PIL import Image, UnidentifiedImageError
+from PIL.Image import DecompressionBombError, DecompressionBombWarning
 
 from toolrecap_v4.cancellation import CancellationToken
 from toolrecap_v4.errors import (
     CancelledError,
+    EmptyApiResponseError,
+    GatewayAuthenticationError,
+    GatewayConnectionError,
     GatewayError,
+    GatewayNotFoundError,
+    GatewayPermissionError,
+    GatewayRateLimitError,
+    GatewayRequestTimeoutError,
     GatewayResponseError,
+    GatewayServerError,
+    GatewayTimeoutError,
     InvalidGatewayResponseError,
+    MalformedApiResponseError,
+    MalformedModelJsonError,
     ModelCapabilityError,
+    PayloadContextError,
     UnsupportedMediaError,
 )
 
+SUPPORTED_IMAGE_FORMATS = ("JPEG", "PNG")
+JPEG_MAGIC = b"\xff\xd8\xff"
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+DEFAULT_MAX_IMAGES_PER_REQUEST = 16
+DEFAULT_MAX_IMAGE_BYTES = 4 * 1024 * 1024  # 4 MiB
+DEFAULT_MAX_IMAGE_DIMENSION = 4096  # 4096 x 4096 px
+DEFAULT_MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024  # 16 MiB
+DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # 10 MiB
+DEFAULT_MAX_RETRY_DELAY_SECONDS = 60.0
 TRANSIENT_STATUS_CODES = {408, 429, 500, 502, 503, 504}
-
-SUPPORTED_VIDEO_EXTENSIONS = {
-    ".mp4": "video/mp4",
-    ".mkv": "video/x-matroska",
-    ".mov": "video/quicktime",
-    ".m4v": "video/x-m4v",
-    ".avi": "video/x-msvideo",
-    ".ts": "video/mp2t",
-    ".m2ts": "video/mp2t",
-    ".webm": "video/webm",
-}
-
-DEFAULT_MAX_FILE_SIZE_BYTES: Optional[int] = None  # None by default (no 500 MB limit)
-DEFAULT_CHUNK_SIZE = 65535  # Divisible by 3 (65535 // 3 = 21845) for unpadded base64 streaming
-
-
-class StreamingChatPayload:
-    """Streamable JSON payload for chat completions with embedded base64 video media.
-
-    Streams the full JSON request body in chunks without loading entire files into RAM.
-    Chunks are read in sizes divisible by 3 (default 65535 bytes) so that intermediate
-    base64 chunks require no padding and concatenate into valid base64 data.
-    """
-
-    def __init__(
-        self,
-        sources: Sequence[Union[Path, str, Tuple[Path, str, int]]],
-        prompt: str,
-        model: str = "ag/gemini-3.8-flash",
-        stream: bool = True,
-        technical_schema: Optional[Union[Dict[str, Any], str]] = None,
-        source_metadata: Optional[List[Dict[str, Any]]] = None,
-        cancellation_token: Optional[CancellationToken] = None,
-        chunk_size: int = DEFAULT_CHUNK_SIZE,
-        reasoning_effort: Optional[str] = None,
-    ) -> None:
-        if chunk_size <= 0 or chunk_size % 3 != 0:
-            raise ValueError(f"chunk_size must be positive and divisible by 3, got {chunk_size}")
-
-        self.prompt = prompt
-        self.model = model
-        self.stream = stream
-        self.technical_schema = technical_schema
-        self.source_metadata = source_metadata
-        self.cancellation_token = cancellation_token
-        self.chunk_size = chunk_size
-        self.reasoning_effort = reasoning_effort.strip().lower() if reasoning_effort and reasoning_effort.strip() else None
-
-        # Normalize sources to (Path, mime_type, file_size)
-        self.sources: List[Tuple[Path, str, int]] = []
-        for s in sources:
-            if isinstance(s, tuple) and len(s) == 3:
-                p, m, sz = s
-                self.sources.append((Path(p).resolve(), m, sz))
-            else:
-                p = Path(s).resolve()
-                ext = p.suffix.lower()
-                m = SUPPORTED_VIDEO_EXTENSIONS.get(ext, "application/octet-stream")
-                sz = p.stat().st_size
-                self.sources.append((p, m, sz))
-
-        # Static JSON head
-        payload_data: Dict[str, Any] = {"model": self.model, "stream": self.stream}
-        if self.reasoning_effort:
-            payload_data["reasoning_effort"] = self.reasoning_effort
-        prefix_json = json.dumps(payload_data, ensure_ascii=False)
-        self._head_bytes = (prefix_json[:-1] + ', "messages": [{"role": "user", "content": [').encode("utf-8")
-        self._prompt_bytes = json.dumps({"type": "text", "text": self.prompt}, ensure_ascii=False).encode("utf-8")
-
-        tech_meta: Dict[str, Any] = {}
-        if self.technical_schema is not None:
-            tech_meta["schema"] = self.technical_schema
-        if self.source_metadata is not None:
-            tech_meta["sources"] = self.source_metadata
-
-        if tech_meta:
-            self._tech_meta_bytes = (b"," + json.dumps({
-                "type": "text",
-                "text": f"Technical Schema & Source Metadata:\n{json.dumps(tech_meta, indent=2, ensure_ascii=False)}"
-            }, ensure_ascii=False).encode("utf-8"))
-        else:
-            self._tech_meta_bytes = b""
-
-        self._tail_bytes = b"]}]}"
-
-        # Precompute exact Content-Length without loading files into memory
-        total = len(self._head_bytes) + len(self._prompt_bytes) + len(self._tech_meta_bytes)
-        self._source_frames: List[Tuple[Path, bytes, bytes]] = []
-
-        for path, mime_type, size in self.sources:
-            prefix = b',{"type": "image_url", "image_url": {"url": "data:' + mime_type.encode("ascii") + b';base64,'
-            suffix = b'"}}'
-            b64_len = ((size + 2) // 3) * 4 if size > 0 else 0
-            total += len(prefix) + b64_len + len(suffix)
-            self._source_frames.append((path, prefix, suffix))
-
-        total += len(self._tail_bytes)
-        self._content_length = total
-
-    @property
-    def content_length(self) -> int:
-        """Exact precomputed Content-Length in bytes."""
-        return self._content_length
-
-    def __len__(self) -> int:
-        return self._content_length
-
-    def __iter__(self):
-        """Yield JSON chunks with cancel checks. Reusable for request retries."""
-        if self.cancellation_token:
-            self.cancellation_token.check_cancelled()
-        yield self._head_bytes
-
-        if self.cancellation_token:
-            self.cancellation_token.check_cancelled()
-        yield self._prompt_bytes
-
-        if self._tech_meta_bytes:
-            if self.cancellation_token:
-                self.cancellation_token.check_cancelled()
-            yield self._tech_meta_bytes
-
-        for path, prefix, suffix in self._source_frames:
-            if self.cancellation_token:
-                self.cancellation_token.check_cancelled()
-            yield prefix
-
-            with open(path, "rb") as f:
-                while True:
-                    if self.cancellation_token:
-                        self.cancellation_token.check_cancelled()
-                    chunk = f.read(self.chunk_size)
-                    if not chunk:
-                        break
-                    yield base64.b64encode(chunk)
-
-            if self.cancellation_token:
-                self.cancellation_token.check_cancelled()
-            yield suffix
-
-        if self.cancellation_token:
-            self.cancellation_token.check_cancelled()
-        yield self._tail_bytes
 
 
 def sanitize_message(msg: str, secrets: Optional[List[Optional[str]]] = None) -> str:
-    """Redact secret strings from message to prevent credential leakage."""
+    """Redact secret strings from message to prevent credential leakage in logs and errors."""
     if not secrets:
         return msg
     sanitized = msg
@@ -190,42 +84,176 @@ def sanitize_message(msg: str, secrets: Optional[List[Optional[str]]] = None) ->
     return sanitized
 
 
+def validate_and_reencode_image(
+    source: Union[Path, str, bytes],
+    *,
+    max_bytes: int = DEFAULT_MAX_IMAGE_BYTES,
+    max_dimension: int = DEFAULT_MAX_IMAGE_DIMENSION,
+) -> Tuple[bytes, str]:
+    """Validate image is genuine still JPEG or PNG and re-encode to strip metadata/trailing bytes.
+
+    Applies:
+    1. Independent pre-Pillow magic byte detection.
+    2. Pillow formats allowlist restricting parser to ['JPEG', 'PNG'].
+    3. Safe DecompressionBombWarning/Error handling.
+    4. Dimension and multi-frame animation checks before pixel decode.
+    5. Clean re-encoding discarding trailing bytes, polyglots, and ancillary metadata.
+
+    Returns:
+        Tuple of (reencoded_bytes, mime_type).
+
+    Raises:
+        UnsupportedMediaError: If image fails magic bytes, decoding, has unsupported format,
+            is animated/multi-frame, exceeds byte/dimension limits, or decompression bomb.
+        FileNotFoundError: If a file path is provided that does not exist.
+    """
+    if isinstance(source, (Path, str)):
+        path = Path(source).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Image file does not exist: {path}")
+        file_size = path.stat().st_size
+        if file_size <= 0:
+            raise UnsupportedMediaError(f"Image file '{path.name}' is empty (0 bytes).")
+        if file_size > max_bytes:
+            raise UnsupportedMediaError(
+                f"Image file '{path.name}' ({file_size} bytes) exceeds limit ({max_bytes} bytes)."
+            )
+        raw_bytes = path.read_bytes()
+    elif isinstance(source, (bytes, bytearray)):
+        raw_bytes = bytes(source)
+        if len(raw_bytes) == 0:
+            raise UnsupportedMediaError("Image bytes are empty (0 bytes).")
+        if len(raw_bytes) > max_bytes:
+            raise UnsupportedMediaError(
+                f"Image bytes ({len(raw_bytes)} bytes) exceed limit ({max_bytes} bytes)."
+            )
+    else:
+        raise UnsupportedMediaError(f"Invalid image source type: {type(source).__name__}")
+
+    # Strict pre-Pillow magic bytes verification
+    is_jpeg = raw_bytes.startswith(JPEG_MAGIC)
+    is_png = raw_bytes.startswith(PNG_MAGIC)
+    if not (is_jpeg or is_png):
+        raise UnsupportedMediaError(
+            "Image failed magic byte validation. Only genuine still JPEG and PNG images are supported."
+        )
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", category=DecompressionBombWarning)
+        try:
+            bio = io.BytesIO(raw_bytes)
+            with Image.open(bio, formats=["JPEG", "PNG"]) as img:
+                fmt = (img.format or "").upper()
+                if fmt not in SUPPORTED_IMAGE_FORMATS:
+                    raise UnsupportedMediaError(
+                        f"Unsupported media format '{fmt}'. Only genuine still JPEG and PNG images are supported."
+                    )
+
+                # Dimension limits before load
+                width, height = img.size
+                if width <= 0 or height <= 0:
+                    raise UnsupportedMediaError(f"Invalid image dimensions: {width}x{height}.")
+                if width > max_dimension or height > max_dimension:
+                    raise UnsupportedMediaError(
+                        f"Image dimensions ({width}x{height}) exceed maximum allowed dimension ({max_dimension}px)."
+                    )
+
+                # Multi-frame / animation check before load
+                if getattr(img, "is_animated", False) or getattr(img, "n_frames", 1) > 1:
+                    raise UnsupportedMediaError(
+                        f"Animated or multi-frame image format ({fmt}) is strictly prohibited."
+                    )
+
+                # Force decoding of pixel data to catch truncated or corrupted streams
+                img.load()
+
+                # Re-encode to clean buffer to discard any trailing garbage or unwanted metadata
+                out_buf = io.BytesIO()
+                if fmt == "JPEG":
+                    save_img = img.convert("RGB") if img.mode not in ("RGB", "L") else img
+                    save_img.save(out_buf, format="JPEG", quality=90)
+                    mime_type = "image/jpeg"
+                else:  # PNG
+                    save_img = img if img.mode in ("RGB", "RGBA", "L") else img.convert("RGBA")
+                    save_img.save(out_buf, format="PNG")
+                    mime_type = "image/png"
+
+                reencoded = out_buf.getvalue()
+
+        except UnsupportedMediaError:
+            raise
+        except (DecompressionBombError, DecompressionBombWarning) as e:
+            raise UnsupportedMediaError(f"Image decompression bomb detected: {e}") from e
+        except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as e:
+            raise UnsupportedMediaError(f"Image decode failed or format spoofed: {e}") from e
+
+    if len(reencoded) > max_bytes:
+        raise UnsupportedMediaError(
+            f"Re-encoded image ({len(reencoded)} bytes) exceeds limit ({max_bytes} bytes)."
+        )
+
+    return reencoded, mime_type
+
+
 def extract_json_from_text(text: str) -> Any:
     """Extract and parse JSON from text without repairing editorial content.
-    
+
     Handles plain JSON or fenced ```json ... ``` blocks.
-    Raises InvalidGatewayResponseError if text is not valid JSON.
+    Raises:
+        EmptyApiResponseError: If response text is empty or contains no content.
+        MalformedModelJsonError: If response text cannot be parsed as JSON.
     """
     stripped = text.strip()
     if not stripped:
-        raise InvalidGatewayResponseError(
+        raise EmptyApiResponseError(
             "Gateway returned an empty response; cannot parse JSON.",
             raw_response=text,
         )
 
-    # Check for markdown code fence
     fenced_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", stripped, re.IGNORECASE)
     if fenced_match:
         candidate = fenced_match.group(1).strip()
     else:
         candidate = stripped
 
+    if not candidate:
+        raise EmptyApiResponseError(
+            "Gateway returned an empty JSON code fence; cannot parse JSON.",
+            raw_response=text,
+        )
+
     try:
         return json.loads(candidate)
     except json.JSONDecodeError as e:
-        raise InvalidGatewayResponseError(
-            f"Gateway response failed JSON parsing ({e}). Automatic repair is strictly prohibited.",
+        raise MalformedModelJsonError(
+            f"Gateway model output failed JSON parsing ({e}). Automatic repair is strictly prohibited.",
             raw_response=text,
         ) from e
 
 
+def _parse_retry_after(header_val: Optional[str]) -> Optional[float]:
+    """Parse HTTP Retry-After header into seconds."""
+    if not header_val:
+        return None
+    try:
+        val = float(header_val.strip())
+        if val >= 0:
+            return val
+    except ValueError:
+        pass
+    return None
+
+
 @dataclass
 class GatewayResult:
-    """Container for sanitized Gateway output."""
+    """Container for Gateway output."""
+
     raw_response: str
     parsed_json: Optional[Union[Dict[str, Any], List[Any]]] = None
     model: str = ""
     usage: Optional[Dict[str, Any]] = None
+    bytes_sent: int = 0
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class GatewayClient:
@@ -238,15 +266,44 @@ class GatewayClient:
         timeout: float = 180.0,
         max_retries: int = 3,
         backoff_factor: float = 0.5,
-        max_file_size_bytes: Optional[int] = DEFAULT_MAX_FILE_SIZE_BYTES,
+        max_retry_delay: float = DEFAULT_MAX_RETRY_DELAY_SECONDS,
+        max_images_per_request: int = DEFAULT_MAX_IMAGES_PER_REQUEST,
+        max_image_bytes: int = DEFAULT_MAX_IMAGE_BYTES,
+        max_image_dimension: int = DEFAULT_MAX_IMAGE_DIMENSION,
+        max_total_image_bytes: int = DEFAULT_MAX_TOTAL_IMAGE_BYTES,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         client: Optional[httpx.Client] = None,
     ) -> None:
+        if timeout <= 0:
+            raise ValueError(f"timeout must be positive, got {timeout}")
+        if max_retries < 0:
+            raise ValueError(f"max_retries must be non-negative, got {max_retries}")
+        if backoff_factor <= 0:
+            raise ValueError(f"backoff_factor must be positive, got {backoff_factor}")
+        if max_retry_delay <= 0:
+            raise ValueError(f"max_retry_delay must be positive, got {max_retry_delay}")
+        if max_images_per_request <= 0:
+            raise ValueError(f"max_images_per_request must be positive, got {max_images_per_request}")
+        if max_image_bytes <= 0:
+            raise ValueError(f"max_image_bytes must be positive, got {max_image_bytes}")
+        if max_image_dimension <= 0:
+            raise ValueError(f"max_image_dimension must be positive, got {max_image_dimension}")
+        if max_total_image_bytes <= 0:
+            raise ValueError(f"max_total_image_bytes must be positive, got {max_total_image_bytes}")
+        if max_response_bytes <= 0:
+            raise ValueError(f"max_response_bytes must be positive, got {max_response_bytes}")
+
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
-        self.max_retries = max(0, max_retries)
+        self.max_retries = max_retries
         self.backoff_factor = backoff_factor
-        self.max_file_size_bytes = max_file_size_bytes
+        self.max_retry_delay = max_retry_delay
+        self.max_images_per_request = max_images_per_request
+        self.max_image_bytes = max_image_bytes
+        self.max_image_dimension = max_image_dimension
+        self.max_total_image_bytes = max_total_image_bytes
+        self.max_response_bytes = max_response_bytes
         self._external_client = client
 
     def _get_client(self) -> httpx.Client:
@@ -263,337 +320,268 @@ class GatewayClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    def validate_model_video_capability(
-        self,
-        model: str,
-        cancellation_token: Optional[CancellationToken] = None,
-        client: Optional[httpx.Client] = None,
-    ) -> bool:
-        """Validate that the target model advertises 'videoInput' capability.
-        
-        Calls GET /v1/models and inspects capabilities.
-        Invariants:
-        - Combo aliases and models with omitted capabilities are not false rejected.
-        - Models explicitly setting videoInput=False are rejected.
-        """
-        if cancellation_token:
-            cancellation_token.check_cancelled()
-
-        url = f"{self.base_url}/v1/models"
-        owned = False
-        if client is None:
-            if self._external_client is not None:
-                client = self._external_client
-            else:
-                client = httpx.Client(timeout=min(10.0, self.timeout))
-                owned = True
-
-        try:
-            resp = client.get(url, headers=self._headers(), timeout=min(10.0, self.timeout))
-            if resp.status_code != 200:
-                raise GatewayResponseError(
-                    self._sanitize(f"Failed to query models from {url}: HTTP {resp.status_code}")
-                )
-            data = resp.json()
-            models_list = data.get("data", []) if isinstance(data, dict) else []
-
-            for m in models_list:
-                if isinstance(m, dict) and m.get("id") == model:
-                    if m.get("owned_by") == "combo":
-                        return True
-                    capabilities = m.get("capabilities")
-                    if capabilities is None or not isinstance(capabilities, dict):
-                        return True
-                    if capabilities.get("videoInput") is False:
-                        raise ModelCapabilityError(
-                            f"Model '{model}' does not advertise 'videoInput' capability."
-                        )
-                    return True
-
-            if model in ("sub", "prime"):
-                return True
-
-            raise ModelCapabilityError(f"Model '{model}' not found in advertised Gateway models.")
-        except (ModelCapabilityError, GatewayResponseError):
-            raise
-        except Exception as e:
-            clean_err = self._sanitize(str(e))
-            raise GatewayError(f"Error checking model video capability: {clean_err}") from e
-        finally:
-            if owned:
-                client.close()
-
-    def validate_model_prime_capability(
-        self,
-        model: str,
-        cancellation_token: Optional[CancellationToken] = None,
-        client: Optional[httpx.Client] = None,
-    ) -> bool:
-        """Validate that the target model is available for Prime text chat synthesis.
-        
-        Calls GET /v1/models and verifies model presence.
-        """
-        if cancellation_token:
-            cancellation_token.check_cancelled()
-
-        if model in ("sub", "prime"):
-            return True
-
-        url = f"{self.base_url}/v1/models"
-        owned = False
-        if client is None:
-            if self._external_client is not None:
-                client = self._external_client
-            else:
-                client = httpx.Client(timeout=min(10.0, self.timeout))
-                owned = True
-
-        try:
-            resp = client.get(url, headers=self._headers(), timeout=min(10.0, self.timeout))
-            if resp.status_code != 200:
-                raise GatewayResponseError(
-                    self._sanitize(f"Failed to query models from {url}: HTTP {resp.status_code}")
-                )
-            data = resp.json()
-            models_list = data.get("data", []) if isinstance(data, dict) else []
-
-            for m in models_list:
-                if isinstance(m, dict) and m.get("id") == model:
-                    return True
-
-            raise ModelCapabilityError(f"Model '{model}' not found in advertised Gateway models.")
-        except (ModelCapabilityError, GatewayResponseError):
-            raise
-        except Exception as e:
-            clean_err = self._sanitize(str(e))
-            raise GatewayError(f"Error checking prime model capability: {clean_err}") from e
-        finally:
-            if owned:
-                client.close()
-
-    def _validate_sources(
-        self,
-        sources: Sequence[Union[Path, str]],
-    ) -> List[Tuple[Path, str, int]]:
-        """Validate media formats and sizes without reading file contents into memory."""
-        if not sources:
-            raise ValueError("At least one video source must be provided.")
-
-        validated: List[Tuple[Path, str, int]] = []
-        for source in sources:
-            path = Path(source).resolve()
-            if not path.exists():
-                raise FileNotFoundError(f"Source media file does not exist: {path}")
-
-            ext = path.suffix.lower()
-            if ext not in SUPPORTED_VIDEO_EXTENSIONS:
-                raise UnsupportedMediaError(
-                    f"Unsupported media container '{ext}' for file {path.name}. "
-                    f"Supported formats: {sorted(list(SUPPORTED_VIDEO_EXTENSIONS.keys()))}. "
-                    "Preprocessing or conversion is strictly prohibited."
-                )
-
-            size = path.stat().st_size
-            if size <= 0:
-                raise UnsupportedMediaError(
-                    f"Media file '{path.name}' is empty (0 bytes). Zero preprocessing policy forbids repair."
-                )
-            if self.max_file_size_bytes is not None and size > self.max_file_size_bytes:
-                raise UnsupportedMediaError(
-                    f"Media file '{path.name}' ({size} bytes) exceeds maximum limit "
-                    f"({self.max_file_size_bytes} bytes). Preprocessing or compression is strictly prohibited."
-                )
-
-            mime_type = SUPPORTED_VIDEO_EXTENSIONS[ext]
-            validated.append((path, mime_type, size))
-
-        return validated
-
-    def _validate_and_encode_sources(
-        self,
-        sources: Sequence[Union[Path, str]],
-    ) -> List[Dict[str, Any]]:
-        """Validate media formats/sizes and encode original bytes to data video URIs.
-        
-        Zero preprocessing: if container or size is invalid, fails immediately.
-        """
-        validated = self._validate_sources(sources)
-        encoded_parts: List[Dict[str, Any]] = []
-
-        for path, mime_type, _ in validated:
-            raw_bytes = path.read_bytes()
-            b64_data = base64.b64encode(raw_bytes).decode("ascii")
-            data_uri = f"data:{mime_type};base64,{b64_data}"
-
-            encoded_parts.append({
-                "type": "image_url",
-                "image_url": {"url": data_uri},
-            })
-
-        return encoded_parts
-
-    def submit_chat_analysis(
-        self,
-        sources: Sequence[Union[Path, str]],
-        prompt: str,
-        model: str = "sub",
-        technical_schema: Optional[Union[Dict[str, Any], str]] = None,
-        source_metadata: Optional[List[Dict[str, Any]]] = None,
-        stream: bool = True,
-        validate_capability: bool = True,
-        cancellation_token: Optional[CancellationToken] = None,
-        reasoning_effort: Optional[str] = None,
-        expect_json: bool = True,
-    ) -> GatewayResult:
-        """Submit all ordered sources and prompt in ONE chat request.
-        
-        Invariants:
-        - All ordered sources sent in ONE chat request using verified image_url data video URIs.
-        - User prompt is sent exact and unchanged.
-        - Technical schema and source metadata are sent separately.
-        - Advertised model capability is validated.
-        - Explicit supported media/size limits fail without preprocessing.
-        - Configured API route (/v1/chat/completions) only.
-        - Finite cancel-aware streaming networking with retries only on transient errors.
-        - Returns raw sanitized response and parsed JSON without repair.
-        """
-        if not prompt or not prompt.strip():
-            raise ValueError("Prompt cannot be empty.")
-
-        if cancellation_token:
-            cancellation_token.check_cancelled()
-
-        owned_client = False
-        if self._external_client is not None:
-            client = self._external_client
-        else:
-            client = httpx.Client(timeout=self.timeout)
-            owned_client = True
-
-        try:
-            # Step 1: Validate advertised model capability if enabled
-            if validate_capability:
-                self.validate_model_video_capability(
-                    model, cancellation_token=cancellation_token, client=client
-                )
-
-            # Step 2: Validate sources (zero preprocessing, no full file RAM read)
-            validated_sources = self._validate_sources(sources)
-
-            # Step 3: Build streaming payload
-            payload = StreamingChatPayload(
-                sources=validated_sources,
-                prompt=prompt,
-                model=model,
-                stream=stream,
-                technical_schema=technical_schema,
-                source_metadata=source_metadata,
-                cancellation_token=cancellation_token,
-                reasoning_effort=reasoning_effort,
+    def _classify_http_error(self, resp: httpx.Response, sanitized_body: str) -> GatewayError:
+        """Classify HTTP response status code into specific GatewayError hierarchy."""
+        status = resp.status_code
+        if status == 401:
+            return GatewayAuthenticationError(
+                f"Gateway authentication failed (HTTP 401): {sanitized_body}",
+                status_code=401,
             )
+        if status == 403:
+            return GatewayPermissionError(
+                f"Gateway access forbidden (HTTP 403): {sanitized_body}",
+                status_code=403,
+            )
+        if status == 404:
+            return GatewayNotFoundError(
+                f"Gateway endpoint or model not found (HTTP 404): {sanitized_body}",
+                status_code=404,
+            )
+        if status == 408:
+            return GatewayRequestTimeoutError(
+                f"Gateway request timeout (HTTP 408): {sanitized_body}",
+                status_code=408,
+            )
+        if status == 413:
+            return PayloadContextError(
+                f"Gateway payload too large (HTTP 413): {sanitized_body}",
+                status_code=413,
+            )
+        if status == 400:
+            lower_body = sanitized_body.lower()
+            if any(
+                kw in lower_body
+                for kw in (
+                    "context_length",
+                    "context window",
+                    "maximum context",
+                    "too many tokens",
+                    "prompt is too long",
+                )
+            ):
+                return PayloadContextError(
+                    f"Gateway context limit exceeded (HTTP 400): {sanitized_body}",
+                    status_code=400,
+                )
+            return GatewayResponseError(
+                f"Gateway returned HTTP 400: {sanitized_body}",
+                raw_response=sanitized_body,
+                status_code=400,
+            )
+        if status == 429:
+            retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+            return GatewayRateLimitError(
+                f"Gateway rate limit exceeded (HTTP 429): {sanitized_body}",
+                retry_after=retry_after,
+                status_code=429,
+            )
+        if 500 <= status <= 599:
+            return GatewayServerError(
+                f"Gateway server error (HTTP {status}): {sanitized_body}",
+                status_code=status,
+            )
+        return GatewayResponseError(
+            f"Gateway returned HTTP {status}: {sanitized_body}",
+            raw_response=sanitized_body,
+            status_code=status,
+        )
 
-            url = f"{self.base_url}/v1/chat/completions"
-            headers = self._headers()
-            headers["Content-Length"] = str(payload.content_length)
+    def validate_model_availability(
+        self,
+        model: str,
+        cancellation_token: Optional[CancellationToken] = None,
+        client: Optional[httpx.Client] = None,
+    ) -> bool:
+        """Validate that target model is available on the Gateway without vendor heuristics.
 
-            # Step 4: Execute cancel-aware streaming network request with bounded retries
-            last_exception: Optional[Exception] = None
+        Queries GET /v1/models provider-neutrally for every model ID.
+        """
+        if not model or not model.strip():
+            raise ValueError("Model identifier cannot be empty.")
 
-            for attempt in range(self.max_retries + 1):
-                if cancellation_token:
-                    cancellation_token.check_cancelled()
+        if cancellation_token:
+            cancellation_token.check_cancelled()
 
-                try:
-                    if stream:
-                        raw_text, usage = self._execute_streaming_request(
-                            client, url, payload, headers, cancellation_token
-                        )
-                    else:
-                        raw_text, usage = self._execute_sync_request(
-                            client, url, payload, headers, cancellation_token
-                        )
+        url = f"{self.base_url}/v1/models"
+        owned = False
+        if client is None:
+            if self._external_client is not None:
+                client = self._external_client
+            else:
+                client = httpx.Client(timeout=min(10.0, self.timeout))
+                owned = True
 
-                    # Step 5: Sanitize response and parse JSON (no repair)
-                    sanitized_response = self._sanitize(raw_text)
-                    if expect_json:
-                        parsed = extract_json_from_text(sanitized_response)
-                    else:
-                        try:
-                            parsed = extract_json_from_text(sanitized_response)
-                        except Exception:
-                            parsed = None
+        try:
+            resp = client.get(url, headers=self._headers(), timeout=min(10.0, self.timeout))
+            if resp.status_code != 200:
+                body = resp.text[:300]
+                clean_body = self._sanitize(body)
+                raise self._classify_http_error(resp, clean_body)
 
-                    return GatewayResult(
-                        raw_response=sanitized_response,
-                        parsed_json=parsed,
-                        model=model,
-                        usage=usage,
-                    )
+            try:
+                data = resp.json()
+            except json.JSONDecodeError as e:
+                raise MalformedApiResponseError(
+                    "Gateway models endpoint returned invalid JSON",
+                    raw_response=self._sanitize(resp.text[:300]),
+                ) from e
 
-                except CancelledError:
-                    raise
-                except (ModelCapabilityError, UnsupportedMediaError):
-                    # Logical errors: fail immediately without retry
-                    raise
-                except InvalidGatewayResponseError as e:
-                    if not getattr(e, "raw_response", None):
-                        e.raw_response = sanitized_response
-                    raise
-                except GatewayResponseError:
-                    # If non-transient status code, fail immediately
-                    raise
-                except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as e:
-                    last_exception = e
-                    clean_err = self._sanitize(str(e))
-                    if attempt < self.max_retries:
-                        sleep_time = self.backoff_factor * (2 ** attempt)
-                        if cancellation_token:
-                            end_time = time.monotonic() + sleep_time
-                            while time.monotonic() < end_time:
-                                cancellation_token.check_cancelled()
-                                time.sleep(0.05)
-                        else:
-                            time.sleep(sleep_time)
-                        continue
-                    else:
-                        raise GatewayError(
-                            f"Gateway request failed after {self.max_retries + 1} attempts: {clean_err}"
-                        ) from e
-                except Exception as e:
-                    clean_err = self._sanitize(str(e))
-                    raise GatewayError(f"Unexpected Gateway error: {clean_err}") from e
+            models_list = data.get("data", []) if isinstance(data, dict) else []
+            for m in models_list:
+                if isinstance(m, dict) and m.get("id") == model:
+                    return True
 
-            if last_exception:
-                raise GatewayError(f"Gateway request failed: {self._sanitize(str(last_exception))}")
-            raise GatewayError("Gateway request failed: retries exhausted.")
+            raise ModelCapabilityError(f"Model '{model}' not found in advertised Gateway models.")
+        except GatewayError:
+            raise
+        except httpx.TimeoutException as e:
+            clean_err = self._sanitize(str(e))
+            raise GatewayTimeoutError(f"Timeout checking model availability: {clean_err}") from e
+        except (httpx.ConnectError, httpx.NetworkError) as e:
+            clean_err = self._sanitize(str(e))
+            raise GatewayConnectionError(
+                f"Connection error checking model availability: {clean_err}"
+            ) from e
+        except (httpx.TransportError, httpx.HTTPError) as e:
+            clean_err = self._sanitize(str(e))
+            raise GatewayConnectionError(
+                f"Transport error checking model availability: {clean_err}"
+            ) from e
         finally:
-            if owned_client:
+            if owned:
                 client.close()
 
     def submit_text_chat(
         self,
         prompt: str,
-        model: str = "prime",
+        model: str,
         system_prompt: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         stream: bool = True,
         expect_json: bool = True,
         cancellation_token: Optional[CancellationToken] = None,
+        phase: Optional[str] = None,
     ) -> GatewayResult:
-        """Submit text-only chat request (Prime stage / synthesis).
-        
-        Invariants:
-        - Text only, no videoInput required.
-        - Configured API route (/v1/chat/completions) only.
-        - Optional reasoning_effort supported.
-        - Cancel-aware streaming networking with transient retries.
-        - Returns raw sanitized response and parsed JSON without repair.
+        """Submit text-only chat request in a provider-neutral boundary.
+
+        Invariant: Strictly text-only. No images parameter or media bypass.
         """
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty.")
+        if not model or not model.strip():
+            raise ValueError("Model identifier cannot be empty.")
 
+        messages: List[Dict[str, Any]] = []
+        if system_prompt and system_prompt.strip():
+            messages.append({"role": "system", "content": system_prompt.strip()})
+        messages.append({"role": "user", "content": prompt})
+
+        payload_dict: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": stream,
+        }
+        if reasoning_effort and reasoning_effort.strip():
+            payload_dict["reasoning_effort"] = reasoning_effort.strip().lower()
+
+        return self._execute_chat_request(
+            payload_dict=payload_dict,
+            model=model,
+            image_count=0,
+            stream=stream,
+            expect_json=expect_json,
+            cancellation_token=cancellation_token,
+            phase=phase,
+        )
+
+    def submit_image_chat(
+        self,
+        prompt: str,
+        images: Sequence[Union[Path, str, bytes]],
+        model: str,
+        system_prompt: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
+        stream: bool = True,
+        expect_json: bool = True,
+        cancellation_token: Optional[CancellationToken] = None,
+        phase: Optional[str] = None,
+    ) -> GatewayResult:
+        """Submit prompt with explicit validated still JPEG/PNG images.
+
+        Invariant: Sole public path for media transport. Validates and re-encodes images.
+        """
+        if not prompt or not prompt.strip():
+            raise ValueError("Prompt cannot be empty.")
+        if not model or not model.strip():
+            raise ValueError("Model identifier cannot be empty.")
+        if not images:
+            raise ValueError("At least one image must be provided for submit_image_chat.")
+        if len(images) > self.max_images_per_request:
+            raise UnsupportedMediaError(
+                f"Requested {len(images)} images exceeds limit of {self.max_images_per_request} images per request."
+            )
+
+        messages: List[Dict[str, Any]] = []
+        if system_prompt and system_prompt.strip():
+            messages.append({"role": "system", "content": system_prompt.strip()})
+
+        user_parts: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        total_bytes = 0
+
+        for img_src in images:
+            encoded_bytes, mime_type = validate_and_reencode_image(
+                img_src,
+                max_bytes=self.max_image_bytes,
+                max_dimension=self.max_image_dimension,
+            )
+            total_bytes += len(encoded_bytes)
+            if total_bytes > self.max_total_image_bytes:
+                raise UnsupportedMediaError(
+                    f"Total re-encoded image bytes ({total_bytes} bytes) exceed limit ({self.max_total_image_bytes} bytes)."
+                )
+            b64_str = base64.b64encode(encoded_bytes).decode("ascii")
+            user_parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime_type};base64,{b64_str}"},
+            })
+
+        messages.append({"role": "user", "content": user_parts})
+
+        payload_dict: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": stream,
+        }
+        if reasoning_effort and reasoning_effort.strip():
+            payload_dict["reasoning_effort"] = reasoning_effort.strip().lower()
+
+        return self._execute_chat_request(
+            payload_dict=payload_dict,
+            model=model,
+            image_count=len(images),
+            stream=stream,
+            expect_json=expect_json,
+            cancellation_token=cancellation_token,
+            phase=phase,
+        )
+
+    def _execute_chat_request(
+        self,
+        payload_dict: Dict[str, Any],
+        model: str,
+        image_count: int,
+        stream: bool,
+        expect_json: bool,
+        cancellation_token: Optional[CancellationToken],
+        phase: Optional[str],
+    ) -> GatewayResult:
+        """Execute chat completion request with exact measurement and bounded retries."""
         if cancellation_token:
             cancellation_token.check_cancelled()
+
+        serialized_bytes = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
+        exact_bytes_sent = len(serialized_bytes)
 
         owned_client = False
         if self._external_client is not None:
@@ -602,86 +590,113 @@ class GatewayClient:
             client = httpx.Client(timeout=self.timeout)
             owned_client = True
 
+        url = f"{self.base_url}/v1/chat/completions"
+        headers = self._headers()
+        headers["Content-Length"] = str(exact_bytes_sent)
+
+        last_transient_error: Optional[GatewayError] = None
+
         try:
-            messages: List[Dict[str, Any]] = []
-            if system_prompt and system_prompt.strip():
-                messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": prompt})
-
-            payload_dict: Dict[str, Any] = {
-                "model": model,
-                "messages": messages,
-                "stream": stream,
-            }
-            if reasoning_effort and reasoning_effort.strip():
-                payload_dict["reasoning_effort"] = reasoning_effort.strip().lower()
-
-            url = f"{self.base_url}/v1/chat/completions"
-            headers = self._headers()
-
-            last_exception: Optional[Exception] = None
-
             for attempt in range(self.max_retries + 1):
                 if cancellation_token:
                     cancellation_token.check_cancelled()
 
+                t0 = time.monotonic()
                 try:
                     if stream:
                         raw_text, usage = self._execute_streaming_request(
-                            client, url, payload_dict, headers, cancellation_token
+                            client, url, serialized_bytes, headers, cancellation_token
                         )
                     else:
                         raw_text, usage = self._execute_sync_request(
-                            client, url, payload_dict, headers, cancellation_token
+                            client, url, serialized_bytes, headers, cancellation_token
                         )
 
-                    sanitized_response = self._sanitize(raw_text)
+                    duration_ms = (time.monotonic() - t0) * 1000.0
+
+                    # Exact model response returned; no redaction applied to valid content
                     if expect_json:
-                        parsed = extract_json_from_text(sanitized_response)
+                        parsed = extract_json_from_text(raw_text)
                     else:
                         try:
-                            parsed = extract_json_from_text(sanitized_response)
-                        except Exception:
+                            parsed = extract_json_from_text(raw_text)
+                        except (MalformedModelJsonError, EmptyApiResponseError):
                             parsed = None
 
+                    metadata: Dict[str, Any] = {
+                        "phase": phase,
+                        "model": model,
+                        "retry_count": attempt,
+                        "image_count": image_count,
+                        "bytes_sent": exact_bytes_sent,
+                        "status_code": 200,
+                        "duration_ms": round(duration_ms, 2),
+                    }
+
                     return GatewayResult(
-                        raw_response=sanitized_response,
+                        raw_response=raw_text,
                         parsed_json=parsed,
                         model=model,
                         usage=usage,
+                        bytes_sent=exact_bytes_sent,
+                        metadata=metadata,
                     )
 
                 except CancelledError:
                     raise
-                except InvalidGatewayResponseError as e:
-                    if not getattr(e, "raw_response", None):
-                        e.raw_response = sanitized_response
+                except (
+                    UnsupportedMediaError,
+                    GatewayAuthenticationError,
+                    GatewayPermissionError,
+                    GatewayNotFoundError,
+                    PayloadContextError,
+                    MalformedApiResponseError,
+                    EmptyApiResponseError,
+                    MalformedModelJsonError,
+                ):
                     raise
-                except GatewayResponseError:
-                    raise
-                except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as e:
-                    last_exception = e
+                except GatewayResponseError as e:
+                    if e.status_code not in TRANSIENT_STATUS_CODES:
+                        raise
+                    last_transient_error = e
+                except (GatewayServerError, GatewayRateLimitError, GatewayRequestTimeoutError) as e:
+                    last_transient_error = e
+                except httpx.TimeoutException as e:
+                    last_transient_error = GatewayTimeoutError(
+                        f"Gateway request timed out: {self._sanitize(str(e))}"
+                    )
+                except (httpx.ConnectError, httpx.NetworkError) as e:
+                    last_transient_error = GatewayConnectionError(
+                        f"Gateway connection error: {self._sanitize(str(e))}"
+                    )
+                except (httpx.TransportError, httpx.HTTPError) as e:
                     clean_err = self._sanitize(str(e))
-                    if attempt < self.max_retries:
-                        sleep_time = self.backoff_factor * (2 ** attempt)
-                        if cancellation_token:
-                            end_time = time.monotonic() + sleep_time
-                            while time.monotonic() < end_time:
-                                cancellation_token.check_cancelled()
-                                time.sleep(0.05)
-                        else:
-                            time.sleep(sleep_time)
-                        continue
-                    else:
-                        raise GatewayError(
-                            f"Gateway request failed after {self.max_retries + 1} attempts: {clean_err}"
-                        ) from e
-                except Exception as e:
-                    clean_err = self._sanitize(str(e))
-                    raise GatewayError(f"Unexpected Gateway error: {clean_err}") from e
+                    last_transient_error = GatewayConnectionError(
+                        f"Gateway transport error: {clean_err}"
+                    )
 
-            if last_exception:
-                raise GatewayError(f"Gateway request failed: {self._sanitize(str(last_exception))}")
+                # Retry transient error with bounded backoff
+                if attempt < self.max_retries:
+                    if (
+                        isinstance(last_transient_error, GatewayRateLimitError)
+                        and last_transient_error.retry_after is not None
+                    ):
+                        sleep_time = min(last_transient_error.retry_after, self.max_retry_delay)
+                    else:
+                        sleep_time = min(self.backoff_factor * (2 ** attempt), self.max_retry_delay)
+
+                    if cancellation_token:
+                        end_time = time.monotonic() + sleep_time
+                        while time.monotonic() < end_time:
+                            cancellation_token.check_cancelled()
+                            time.sleep(min(0.05, max(0.0, end_time - time.monotonic())))
+                    else:
+                        time.sleep(sleep_time)
+                else:
+                    break
+
+            if last_transient_error:
+                raise last_transient_error
             raise GatewayError("Gateway request failed: retries exhausted.")
         finally:
             if owned_client:
@@ -691,73 +706,99 @@ class GatewayClient:
         self,
         client: httpx.Client,
         url: str,
-        payload: Union[Dict[str, Any], StreamingChatPayload, Any],
+        content_bytes: bytes,
         headers: Dict[str, str],
         cancellation_token: Optional[CancellationToken],
     ) -> Tuple[str, Optional[Dict[str, Any]]]:
         """Execute cancel-aware streaming request handling SSE chunks."""
         collected_chunks: List[str] = []
         usage: Optional[Dict[str, Any]] = None
+        total_streamed_chars = 0
 
-        req_headers = dict(headers)
-        if isinstance(payload, dict):
-            kwargs: Dict[str, Any] = {"json": payload}
-        else:
-            kwargs = {"content": payload}
-            if "Content-Type" not in req_headers:
-                req_headers["Content-Type"] = "application/json"
-            if hasattr(payload, "content_length"):
-                req_headers["Content-Length"] = str(payload.content_length)
-            elif hasattr(payload, "__len__"):
-                req_headers["Content-Length"] = str(len(payload))
-
-        with client.stream("POST", url, headers=req_headers, timeout=self.timeout, **kwargs) as resp:
+        with client.stream("POST", url, headers=headers, content=content_bytes, timeout=self.timeout) as resp:
             if resp.status_code != 200:
-                body = resp.read().decode("utf-8", errors="replace")[:300]
+                body = resp.read().decode("utf-8", errors="replace")[:500]
                 clean_body = self._sanitize(body)
-                if resp.status_code in TRANSIENT_STATUS_CODES:
-                    raise httpx.HTTPStatusError(
-                        f"Transient HTTP {resp.status_code}: {clean_body}",
-                        request=resp.request,
-                        response=resp,
-                    )
-                raise GatewayResponseError(
-                    f"Gateway returned HTTP {resp.status_code}: {clean_body}"
-                )
+                raise self._classify_http_error(resp, clean_body)
 
             for line in resp.iter_lines():
                 if cancellation_token and cancellation_token.is_cancelled:
                     resp.close()
-                    raise CancelledError("Gateway analysis cancelled during stream.")
+                    raise CancelledError("Gateway request cancelled during stream.")
 
                 line_str = line.strip()
                 if not line_str or line_str.startswith(":"):
                     continue
 
+                total_streamed_chars += len(line_str)
+                if total_streamed_chars > self.max_response_bytes:
+                    resp.close()
+                    raise GatewayResponseError(
+                        f"Gateway streaming response exceeded limit of {self.max_response_bytes} bytes.",
+                        status_code=resp.status_code,
+                    )
+
                 if line_str.startswith("data: "):
                     data_str = line_str[6:].strip()
                     if data_str == "[DONE]":
                         break
+
                     try:
                         chunk = json.loads(data_str)
-                        choices = chunk.get("choices", [])
-                        if choices:
-                            delta = choices[0].get("delta", {})
-                            content = delta.get("content")
-                            if content:
-                                collected_chunks.append(content)
-                        if "usage" in chunk and chunk["usage"]:
-                            usage = chunk["usage"]
-                    except json.JSONDecodeError:
-                        continue
+                    except json.JSONDecodeError as e:
+                        raise MalformedApiResponseError(
+                            f"Invalid JSON in SSE chunk: {self._sanitize(data_str[:200])}",
+                            raw_response=self._sanitize(data_str[:500]),
+                        ) from e
 
-        return "".join(collected_chunks), usage
+                    if not isinstance(chunk, dict):
+                        raise MalformedApiResponseError(
+                            "SSE chunk is not a JSON object.",
+                            raw_response=self._sanitize(data_str[:500]),
+                        )
+
+                    choices = chunk.get("choices")
+                    if choices is not None:
+                        if not isinstance(choices, list):
+                            raise MalformedApiResponseError(
+                                "SSE chunk 'choices' is not a list.",
+                                raw_response=self._sanitize(data_str[:500]),
+                            )
+                        if len(choices) > 0:
+                            c0 = choices[0]
+                            if not isinstance(c0, dict):
+                                raise MalformedApiResponseError(
+                                    "SSE chunk choices[0] is not an object.",
+                                    raw_response=self._sanitize(data_str[:500]),
+                                )
+                            delta = c0.get("delta")
+                            if delta is not None and isinstance(delta, dict):
+                                piece = delta.get("content")
+                                if piece is not None:
+                                    if not isinstance(piece, str):
+                                        raise MalformedApiResponseError(
+                                            "SSE chunk delta content is not a string.",
+                                            raw_response=self._sanitize(data_str[:500]),
+                                        )
+                                    collected_chunks.append(piece)
+
+                    if "usage" in chunk and isinstance(chunk["usage"], dict):
+                        usage = chunk["usage"]
+
+        full_text = "".join(collected_chunks)
+        if not full_text.strip():
+            raise EmptyApiResponseError(
+                "Gateway streaming response completed with empty content.",
+                raw_response="",
+            )
+
+        return full_text, usage
 
     def _execute_sync_request(
         self,
         client: httpx.Client,
         url: str,
-        payload: Union[Dict[str, Any], StreamingChatPayload, Any],
+        content_bytes: bytes,
         headers: Dict[str, str],
         cancellation_token: Optional[CancellationToken],
     ) -> Tuple[str, Optional[Dict[str, Any]]]:
@@ -765,40 +806,103 @@ class GatewayClient:
         if cancellation_token:
             cancellation_token.check_cancelled()
 
-        req_headers = dict(headers)
-        if isinstance(payload, dict):
-            kwargs: Dict[str, Any] = {"json": payload}
-        else:
-            kwargs = {"content": payload}
-            if "Content-Type" not in req_headers:
-                req_headers["Content-Type"] = "application/json"
-            if hasattr(payload, "content_length"):
-                req_headers["Content-Length"] = str(payload.content_length)
-            elif hasattr(payload, "__len__"):
-                req_headers["Content-Length"] = str(len(payload))
+        resp = client.post(url, headers=headers, content=content_bytes, timeout=self.timeout)
 
-        resp = client.post(url, headers=req_headers, timeout=self.timeout, **kwargs)
         if cancellation_token:
             cancellation_token.check_cancelled()
 
         if resp.status_code != 200:
-            body = resp.text[:300]
+            body = resp.text[:500]
             clean_body = self._sanitize(body)
-            if resp.status_code in TRANSIENT_STATUS_CODES:
-                raise httpx.HTTPStatusError(
-                    f"Transient HTTP {resp.status_code}: {clean_body}",
-                    request=resp.request,
-                    response=resp,
-                )
+            raise self._classify_http_error(resp, clean_body)
+
+        if len(resp.content) > self.max_response_bytes:
             raise GatewayResponseError(
-                f"Gateway returned HTTP {resp.status_code}: {clean_body}"
+                f"Gateway response size ({len(resp.content)} bytes) exceeded limit of {self.max_response_bytes} bytes.",
+                status_code=resp.status_code,
             )
 
-        data = resp.json()
-        choices = data.get("choices", [])
-        if not choices:
-            raise GatewayResponseError("Gateway returned response with no choices.")
+        if not resp.text or not resp.text.strip():
+            raise EmptyApiResponseError(
+                "Gateway returned an empty response body.",
+                raw_response="",
+                status_code=resp.status_code,
+            )
 
-        content = choices[0].get("message", {}).get("content", "")
+        try:
+            data = resp.json()
+        except json.JSONDecodeError as e:
+            raise MalformedApiResponseError(
+                f"Gateway response is not valid JSON: {self._sanitize(resp.text[:200])}",
+                raw_response=self._sanitize(resp.text[:500]),
+                status_code=resp.status_code,
+            ) from e
+
+        if not isinstance(data, dict):
+            raise MalformedApiResponseError(
+                "Gateway response JSON root is not an object.",
+                raw_response=self._sanitize(resp.text[:500]),
+                status_code=resp.status_code,
+            )
+
+        if "choices" not in data or not isinstance(data["choices"], list):
+            raise MalformedApiResponseError(
+                "Gateway response missing or invalid 'choices' list.",
+                raw_response=self._sanitize(resp.text[:500]),
+                status_code=resp.status_code,
+            )
+
+        choices = data["choices"]
+        if len(choices) == 0:
+            raise EmptyApiResponseError(
+                "Gateway returned response with empty 'choices' list.",
+                raw_response=self._sanitize(resp.text[:500]),
+                status_code=resp.status_code,
+            )
+
+        choice_0 = choices[0]
+        if not isinstance(choice_0, dict):
+            raise MalformedApiResponseError(
+                "Gateway response choices[0] is not an object.",
+                raw_response=self._sanitize(resp.text[:500]),
+                status_code=resp.status_code,
+            )
+
+        if "message" not in choice_0 or not isinstance(choice_0["message"], dict):
+            raise MalformedApiResponseError(
+                "Gateway response choices[0] missing or invalid 'message' object.",
+                raw_response=self._sanitize(resp.text[:500]),
+                status_code=resp.status_code,
+            )
+
+        content = choice_0["message"].get("content")
+        if content is None:
+            raise EmptyApiResponseError(
+                "Gateway response choices[0].message.content is null/missing.",
+                raw_response=self._sanitize(resp.text[:500]),
+                status_code=resp.status_code,
+            )
+
+        if not isinstance(content, str):
+            raise MalformedApiResponseError(
+                f"Gateway response content must be string, got {type(content).__name__}.",
+                raw_response=self._sanitize(resp.text[:500]),
+                status_code=resp.status_code,
+            )
+
+        if not content.strip():
+            raise EmptyApiResponseError(
+                "Gateway response choices[0].message.content is empty.",
+                raw_response=self._sanitize(resp.text[:500]),
+                status_code=resp.status_code,
+            )
+
         usage = data.get("usage")
+        if usage is not None and not isinstance(usage, dict):
+            raise MalformedApiResponseError(
+                "Gateway response 'usage' field is invalid.",
+                raw_response=self._sanitize(resp.text[:500]),
+                status_code=resp.status_code,
+            )
+
         return content, usage

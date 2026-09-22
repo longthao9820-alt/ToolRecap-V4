@@ -80,6 +80,10 @@ class DiscoveryError(ToolRecapError):
     """Raised when source discovery fails."""
 
 
+class AnalysisPipelineUnavailableError(ToolRecapError):
+    """Raised when analysis is required but the analysis pipeline is unavailable in Phase 2."""
+
+
 class CancelledError(ToolRecapError):
     """Raised when an operation is cancelled."""
 
@@ -104,24 +108,112 @@ class GatewayError(ToolRecapError):
     """Base exception for AI Gateway client failures."""
 
 
-class ModelCapabilityError(GatewayError):
-    """Raised when model lacks advertised capability (e.g. videoInput)."""
+class GatewayConnectionError(GatewayError):
+    """Raised when network connection to AI Gateway fails."""
+
+
+class GatewayTimeoutError(GatewayError):
+    """Raised when request to AI Gateway times out."""
+
+
+class GatewayRequestTimeoutError(GatewayTimeoutError):
+    """Raised when Gateway returns HTTP 408 Request Timeout."""
+
+    def __init__(self, message: str, status_code: int = 408) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class GatewayAuthenticationError(GatewayError):
+    """Raised when Gateway returns HTTP 401 Unauthorized."""
+
+    def __init__(self, message: str, status_code: int = 401) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class GatewayPermissionError(GatewayError):
+    """Raised when Gateway returns HTTP 403 Forbidden."""
+
+    def __init__(self, message: str, status_code: int = 403) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class GatewayNotFoundError(GatewayError):
+    """Raised when Gateway returns HTTP 404 Not Found."""
+
+    def __init__(self, message: str, status_code: int = 404) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class GatewayRateLimitError(GatewayError):
+    """Raised when Gateway returns HTTP 429 Rate Limit Exceeded."""
+
+    def __init__(
+        self,
+        message: str,
+        retry_after: Optional[float] = None,
+        status_code: int = 429,
+    ) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+        self.status_code = status_code
+
+
+class GatewayServerError(GatewayError):
+    """Raised when Gateway returns HTTP 5xx Server Error."""
+
+    def __init__(self, message: str, status_code: int = 500) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class PayloadContextError(GatewayError):
+    """Raised when request payload exceeds context window or prompt size limits."""
+
+    def __init__(self, message: str, status_code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class UnsupportedMediaError(GatewayError):
-    """Raised when media format, container or size fails without preprocessing."""
+    """Raised when media format, container, dimensions, or size fails validation."""
 
 
 class GatewayResponseError(GatewayError):
     """Raised when Gateway returns an error or malformed response."""
 
-    def __init__(self, message: str, raw_response: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        raw_response: Optional[str] = None,
+        status_code: Optional[int] = None,
+    ) -> None:
         super().__init__(message)
         self.raw_response = raw_response
+        self.status_code = status_code
+
+
+class MalformedApiResponseError(GatewayResponseError):
+    """Raised when Gateway API HTTP response envelope is malformed or invalid JSON/SSE."""
+
+
+class EmptyApiResponseError(GatewayResponseError):
+    """Raised when Gateway returns an empty response body or empty choices."""
 
 
 class InvalidGatewayResponseError(GatewayResponseError):
-    """Raised when Gateway response cannot be parsed as JSON."""
+    """Raised when Gateway response cannot be parsed as JSON (compatibility base)."""
+
+
+class MalformedModelJsonError(InvalidGatewayResponseError):
+    """Raised when Gateway model output text cannot be parsed as JSON."""
+
+
+class ModelCapabilityError(GatewayError):
+    """Raised when model lacks requested capability."""
 
 
 class VoiceStudioError(ToolRecapError):

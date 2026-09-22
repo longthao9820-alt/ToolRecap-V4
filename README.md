@@ -1,21 +1,22 @@
-# Hướng dẫn sử dụng ToolRecap V4 (Phase 1 Baseline)
+# Hướng dẫn sử dụng ToolRecap V4 (Phase 2 Safe Gateway & Transport Boundary)
 
 ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tóm tắt và dựng video recap từ video nguồn.
 
 ---
 
-## 1. Trạng thái hiện tại: Phase 1 Baseline
+## 1. Trạng thái hiện tại: Phase 2 Safe Gateway & Transport Boundary
 
 > **LƯU Ý TRUNG THỰC VỀ TIẾN ĐỘ & BẢN DỰNG:**
-> Hiện tại dự án đang ở mốc hoàn thành **Phase 1 (Baseline Migration & Isolated Repository)**:
-> - Đã khởi tạo cấu trúc độc lập ToolRecap V4 từ commit cơ sở V3 `b4c09c358a438d847444a4994cec9c1d11297e8d`.
-> - Đã chuyển đổi namespace `toolrecap_v3` -> `toolrecap_v4`, nhận diện thương hiệu V4, phiên bản v4.0.0, đường dẫn lưu trữ riêng biệt `%LOCALAPPDATA%\ToolRecapV4\`.
+> Hiện tại dự án đã hoàn thành **Phase 2 (Safe Gateway & Transport Boundary)**:
+> - **Đã loại bỏ hoàn toàn API gửi whole-video**: Toàn bộ các API truyền tệp video nguyên bản (`StreamingChatPayload`, `submit_chat_analysis`, `validate_model_video_capability`, `DEFAULT_MAX_FILE_SIZE_BYTES`, `SUPPORTED_VIDEO_EXTENSIONS`) đã bị xóa khỏi production code.
+> - **AI Gateway an toàn, trung lập nhà cung cấp**: Chỉ hỗ trợ văn bản/JSON và ảnh tĩnh đã được kiểm định (`validate_and_reencode_image`, `submit_text_chat`, `submit_image_chat`), kiểm tra tính sẵn sàng model trung lập (`validate_model_availability`).
+> - **Phụ thuộc runtime**: Đã khai báo `Pillow>=10.0.0` trong `pyproject.toml` phục vụ kiểm tra và chuẩn hóa ảnh tĩnh.
+> - **Workflow kiểm soát chặt chẽ**:
+>   - Khi dự án đã có Final JSON hợp lệ hoặc được import từ trước: chạy thẳng vào luồng dựng (render), thực hiện chính xác 0 lượt gọi Gateway.
+>   - Khi cần phân tích video nhưng chưa có Final JSON: quy trình dừng ngay lập tức với ngoại lệ tường minh `AnalysisPipelineUnavailableError` trước khi đọc tệp nguồn, trước mọi lượt gọi Gateway, trước khi ghi checkpoint sub/raw, trước voice và trước render. Trạng thái dự án ghi nhận `FAILED`.
+> - **CHƯA CÓ CÁC TÍNH NĂNG PHASE 3+**: Scanner từng phần, Season Catalog, Season Planner, Vision Extraction, Output Writers độc lập và Output Directory resolver CHƯA được triển khai.
 > - **CHƯA CÓ BẢN DỰNG EXE**: Chưa chạy đóng gói `build_portable.py` / PyInstaller; chưa có tệp `ToolRecapV4.exe` trong `dist/` hoặc bản nén trong `release/`.
-> - **CHƯA SẴN SÀNG PRODUCTION**: Mã nguồn ở giai đoạn baseline kỹ thuật, chưa được kiểm chứng phát hành (no release verified).
 > - **MỤC TIÊU CẬP NHẬT CHƯA XÁC MINH PHÁT HÀNH**: Cấu hình kho cập nhật đích `longthao9820-alt/ToolRecap-V4` là định danh cấu hình, chưa có bản release thực tế trên remote.
-> - **Hành vi luồng xử lý video (whole-video transport / Sub-Prime) hiện vẫn được giữ nguyên từ V3 baseline.**
-> - Kiến trúc V4 đầy đủ (Scanner từng phần, Season Catalog, Season Planner, các Output Writer độc lập, Selective Vision, bộ giải quyết thư mục xuất) sẽ được triển khai lần lượt từ Phase 2 trở đi theo kế hoạch `TOOLRECAP_V4_MIGRATION_PLAN.md`.
-> - Toàn bộ 215 bài kiểm thử baseline đã được chuyển đổi sang V4 và chạy đạt 100%.
 
 ---
 

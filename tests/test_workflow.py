@@ -29,6 +29,7 @@ import pytest
 from toolrecap_v4.cancellation import CancellationToken
 from toolrecap_v4.discovery import SourceFingerprint, compute_file_fingerprint
 from toolrecap_v4.errors import (
+    AnalysisPipelineUnavailableError,
     CancelledError,
     DiscoveryError,
     InvalidGatewayResponseError,
@@ -157,43 +158,7 @@ def test_mock_oneclick_sequence_final_saved_first(test_storage: ProjectPersisten
             fps=25.0,
         )
 
-    valid_response_json = {
-        "schema_version": "3.0",
-        "project_id": project_id,
-        "project_name": "OneClick_Project",
-        "sources": [{"source_file": "ep01.mp4"}],
-        "outputs": [
-            {
-                "render_id": "render-01",
-                "title": "Recap_1",
-                "segments": [
-                    {
-                        "segment_id": "seg-1",
-                        "source_file": "ep01.mp4",
-                        "start_ms": 0,
-                        "end_ms": 1000,
-                        "type": "original_dialogue",
-                        "narration": "",
-                        "source_audio": True,
-                        "subtitles": [],
-                    }
-                ],
-            }
-        ],
-    }
-
     mock_gw = MagicMock(spec=GatewayClient)
-    raw_text = f"```json\n{json.dumps(valid_response_json)}\n```"
-    mock_gw.submit_chat_analysis.return_value = GatewayResult(
-        raw_response="Sub video analysis text for ep01",
-        parsed_json=None,
-        model="sub",
-    )
-    mock_gw.submit_text_chat.return_value = GatewayResult(
-        raw_response=raw_text,
-        parsed_json=valid_response_json,
-        model="prime",
-    )
 
     workflow = ProjectWorkflow(
         persistence=test_storage,
@@ -209,27 +174,23 @@ def test_mock_oneclick_sequence_final_saved_first(test_storage: ProjectPersisten
     )
     assert state["status"] == ProjectStatus.CREATED.value
 
-    with patch("toolrecap_v4.workflow.render_output", side_effect=mock_render):
-        final_state = workflow.start_project(project_id)
+    with pytest.raises(AnalysisPipelineUnavailableError, match="unavailable in Phase 2"):
+        workflow.start_project(project_id)
 
-    # Invariants: 2 Gateway calls (Sub + Prime)
-    assert mock_gw.submit_chat_analysis.call_count == 1
-    assert mock_gw.submit_text_chat.call_count == 1
+    # Invariants: 0 Gateway calls
+    assert mock_gw.submit_text_chat.call_count == 0
+    assert not hasattr(mock_gw, "submit_chat_analysis")
 
-    # Invariant: sub_analysis saved to disk
-    assert test_storage.has_sub_analysis(project_id) is True
-    assert test_storage.load_sub_analysis(project_id) == "Sub video analysis text for ep01"
+    # Invariant: sub_analysis and final_json NOT saved to disk
+    assert test_storage.has_sub_analysis(project_id) is False
+    assert test_storage.has_raw_response(project_id) is False
+    assert test_storage.has_final_json(project_id) is False
 
-    # Invariant: final validated and saved BEFORE voice/render
-    assert final_json_saved_before_render is True
-
-    # Invariant: raw response persisted to disk
-    assert test_storage.has_raw_response(project_id) is True
-    assert test_storage.load_raw_response(project_id) == raw_text
-
-    # Invariant: state is COMPLETED
-    assert final_state["status"] == ProjectStatus.COMPLETED.value
-    assert final_state["outputs"]["render-01"]["status"] == OutputStatus.COMPLETED.value
+    # Invariant: state is FAILED with error and failed_at persisted
+    failed_state = test_storage.load_project(project_id)
+    assert failed_state["status"] == ProjectStatus.FAILED.value
+    assert "Analysis pipeline is unavailable" in failed_state["error"]
+    assert "failed_at" in failed_state["timestamps"]
 
 
 def test_import_zero_ai(test_storage: ProjectPersistence, sample_video: Path, tmp_path: Path):
@@ -263,7 +224,7 @@ def test_import_zero_ai(test_storage: ProjectPersistence, sample_video: Path, tm
     }
 
     mock_gw = MagicMock(spec=GatewayClient)
-    mock_gw.submit_chat_analysis.side_effect = AssertionError("Gateway MUST NOT be called on imported project!")
+    mock_gw.submit_text_chat.side_effect = AssertionError("Gateway MUST NOT be called on imported project!")
 
     def mock_render(*args, **kwargs):
         out_mp4 = output_dir / "Recap_Import.mp4"
@@ -302,7 +263,7 @@ def test_import_zero_ai(test_storage: ProjectPersistence, sample_video: Path, tm
         completed_state = workflow.start_project(project_id)
 
     # 0 AI calls
-    assert mock_gw.submit_chat_analysis.call_count == 0
+    assert mock_gw.submit_text_chat.call_count == 0
     assert completed_state["status"] == ProjectStatus.COMPLETED.value
 
 
@@ -565,7 +526,7 @@ def test_changed_audio_zero_ai(test_storage: ProjectPersistence, sample_video: P
     }
 
     mock_gw = MagicMock(spec=GatewayClient)
-    mock_gw.submit_chat_analysis.side_effect = AssertionError("Gateway MUST NOT be called!")
+    mock_gw.submit_text_chat.side_effect = AssertionError("Gateway MUST NOT be called!")
 
     render_calls = 0
 
@@ -610,55 +571,85 @@ def test_changed_audio_zero_ai(test_storage: ProjectPersistence, sample_video: P
         workflow.resume_project(project_id, settings=new_settings)
 
     # Invariant: 0 AI calls, output rerendered because fingerprint changed
-    assert mock_gw.submit_chat_analysis.call_count == 0
+    assert mock_gw.submit_text_chat.call_count == 0
     assert render_calls == 2
 
 
-def test_invalid_json_raw_saved(test_storage: ProjectPersistence, sample_video: Path, tmp_path: Path):
-    """Verify invalid JSON response from Gateway is preserved to disk and state/error."""
-    project_id = "proj-invalid-json-01"
+def test_analysis_required_fails_before_gateway(test_storage: ProjectPersistence, sample_video: Path, tmp_path: Path):
+    """Verify that when analysis is required and no Final JSON exists, workflow fails before any Gateway call and invokes error callback."""
+    project_id = "proj-no-final-json-01"
     output_dir = tmp_path / "outputs"
 
-    invalid_raw_text = "This is malformed non-JSON response from AI: { broken }"
-
     mock_gw = MagicMock(spec=GatewayClient)
-    # Simulate GatewayClient behavior on invalid JSON
-    err = InvalidGatewayResponseError("Automatic repair is strictly prohibited.", raw_response=invalid_raw_text)
-    mock_gw.submit_chat_analysis.side_effect = err
-
     workflow = ProjectWorkflow(persistence=test_storage, gateway_client=mock_gw)
     workflow.create_project(
         project_id=project_id,
-        project_name="Invalid_JSON_Project",
+        project_name="No_Final_JSON_Project",
         source_input=sample_video,
         prompt="Test prompt",
         output_dir=output_dir,
     )
 
-    with pytest.raises(InvalidGatewayResponseError):
-        workflow.start_project(project_id)
+    status_events = []
+    error_events = []
+    callbacks = WorkflowCallbacks(
+        on_status_change=lambda s: status_events.append(s),
+        on_error=lambda err, raw: error_events.append((err, raw)),
+    )
 
-    # Invariant: raw response persisted to disk
-    assert test_storage.has_raw_response(project_id) is True
-    assert test_storage.load_raw_response(project_id) == invalid_raw_text
+    with pytest.raises(AnalysisPipelineUnavailableError):
+        workflow.start_project(project_id, callbacks=callbacks)
 
-    # Invariant: state records failed status and raw response
+    # Zero Gateway calls made
+    assert mock_gw.submit_text_chat.call_count == 0
+
+    # Invariant: state records failed status and error
     state = test_storage.load_project(project_id)
     assert state["status"] == ProjectStatus.FAILED.value
-    assert state["raw_response"] == invalid_raw_text
-    assert "Automatic repair is strictly prohibited" in state["error"]
+    assert "Analysis pipeline is unavailable" in state["error"]
+    assert "failed_at" in state["timestamps"]
+
+    # Callbacks received failure
+    assert ProjectStatus.FAILED.value in status_events
+    assert len(error_events) == 1
+    assert isinstance(error_events[0][0], AnalysisPipelineUnavailableError)
 
 
 def test_source_changed_failure(test_storage: ProjectPersistence, sample_video: Path, tmp_path: Path):
     """Verify that modifying a source video file triggers SourceChangedError without substitution."""
     project_id = "proj-src-changed-01"
 
+    valid_final_json = {
+        "schema_version": "3.0",
+        "project_id": project_id,
+        "project_name": "Source_Changed_Project",
+        "sources": [{"source_file": "ep01.mp4"}],
+        "outputs": [
+            {
+                "render_id": "render-01",
+                "title": "Recap_Source_Changed",
+                "segments": [
+                    {
+                        "segment_id": "seg-1",
+                        "source_file": "ep01.mp4",
+                        "start_ms": 0,
+                        "end_ms": 1000,
+                        "type": "original_dialogue",
+                        "narration": "",
+                        "source_audio": True,
+                        "subtitles": [],
+                    }
+                ],
+            }
+        ],
+    }
+
     workflow = ProjectWorkflow(persistence=test_storage)
-    workflow.create_project(
+    workflow.import_project(
         project_id=project_id,
         project_name="Source_Changed_Project",
         source_input=sample_video,
-        prompt="Test prompt",
+        final_json=valid_final_json,
     )
 
     # Modify the source file on disk
@@ -949,223 +940,58 @@ def test_stored_metadata_and_secret_prevention(test_storage: ProjectPersistence,
         })
 
 
-def test_dual_stage_sub_free_text_and_prime_json(test_storage: ProjectPersistence, sample_video: Path, tmp_path: Path):
-    """Verify Sub stage produces freeText analysis and Prime stage produces final JSON."""
-    project_id = "proj-dual-freetext-01"
+def test_analysis_unavailable_makes_zero_gateway_calls_and_no_video_payload(test_storage: ProjectPersistence, sample_video: Path, tmp_path: Path):
+    """Verify attempting analysis without Final JSON makes zero Gateway calls, generates no video payload, and raises AnalysisPipelineUnavailableError."""
+    project_id = "proj-negative-no-video-01"
     output_dir = tmp_path / "outputs"
 
-    valid_response_json = {
-        "schema_version": "3.0",
-        "project_id": project_id,
-        "project_name": "Dual_Stage_Project",
-        "sources": [{"source_file": "ep01.mp4"}],
-        "outputs": [
-            {
-                "render_id": "render-01",
-                "title": "Recap_Dual",
-                "segments": [
-                    {
-                        "segment_id": "seg-1",
-                        "source_file": "ep01.mp4",
-                        "start_ms": 0,
-                        "end_ms": 1000,
-                        "type": "original_dialogue",
-                        "narration": "",
-                        "source_audio": True,
-                        "subtitles": [],
-                    }
-                ],
-            }
-        ],
-    }
-
-    raw_sub_freetext = "Sub stage free-text analysis: video contains opening scenes with character interaction."
-    raw_prime_json = f"```json\n{json.dumps(valid_response_json)}\n```"
-
     mock_gw = MagicMock(spec=GatewayClient)
-    mock_gw.submit_chat_analysis.return_value = GatewayResult(
-        raw_response=raw_sub_freetext,
-        parsed_json=None,
-        model="sub",
-    )
-    mock_gw.submit_text_chat.return_value = GatewayResult(
-        raw_response=raw_prime_json,
-        parsed_json=valid_response_json,
-        model="prime",
-    )
-
-    def mock_render(*args, **kwargs):
-        out_mp4 = output_dir / "Recap_Dual.mp4"
-        out_mp4.parent.mkdir(parents=True, exist_ok=True)
-        out_mp4.write_bytes(b"dummy mp4")
-        return RenderResult(
-            output_path=out_mp4,
-            narration_srt_path=output_dir / "Recap_Dual.narration.srt",
-            original_srt_path=output_dir / "Recap_Dual.original.srt",
-            duration=1.0,
-            title="Recap_Dual",
-            render_id="render-01",
-            video_codec="h264",
-            audio_codec="aac",
-            width=640,
-            height=480,
-            fps=25.0,
-        )
-
-    workflow = ProjectWorkflow(
-        persistence=test_storage,
-        gateway_client=mock_gw,
-    )
-
+    workflow = ProjectWorkflow(persistence=test_storage, gateway_client=mock_gw)
     workflow.create_project(
         project_id=project_id,
-        project_name="Dual_Stage_Project",
-        source_input=sample_video,
-        prompt="Summarize character interactions.",
-        output_dir=output_dir,
-    )
-
-    with patch("toolrecap_v4.workflow.render_output", side_effect=mock_render):
-        final_state = workflow.start_project(project_id)
-
-    # Invariant: actual 2 calls not weakened
-    assert mock_gw.submit_chat_analysis.call_count == 1
-    assert mock_gw.submit_text_chat.call_count == 1
-
-    # Invariant: Sub call is freeText (expect_json=False) with source_metadata
-    sub_kwargs = mock_gw.submit_chat_analysis.call_args[1]
-    assert sub_kwargs["expect_json"] is False
-    assert sub_kwargs["source_metadata"] is not None
-    assert len(sub_kwargs["source_metadata"]) == 1
-    assert sub_kwargs["source_metadata"][0]["source_file"] == "ep01.mp4"
-    assert sub_kwargs["source_metadata"][0]["duration_ms"] > 0
-
-    # Invariant: Prime call expects JSON (expect_json=True) and receives Sub freeText in prompt, technical metadata, and unchanged prompt
-    prime_kwargs = mock_gw.submit_text_chat.call_args[1]
-    assert prime_kwargs["expect_json"] is True
-    assert raw_sub_freetext in prime_kwargs["prompt"]
-    assert "Original User Prompt:\nSummarize character interactions." in prime_kwargs["prompt"]
-    assert "Technical Metadata" in prime_kwargs["prompt"]
-    assert project_id in prime_kwargs["prompt"]
-    assert "ep01.mp4" in prime_kwargs["prompt"]
-
-    # Invariant: checkpoints persisted to disk
-    assert test_storage.has_sub_analysis(project_id) is True
-    assert test_storage.load_sub_analysis(project_id) == raw_sub_freetext
-    assert test_storage.has_raw_response(project_id) is True
-    assert test_storage.load_raw_response(project_id) == raw_prime_json
-    assert test_storage.has_final_json(project_id) is True
-
-    assert final_state["status"] == ProjectStatus.COMPLETED.value
-
-
-def test_dual_stage_prime_fail_reuses_sub_checkpoint(test_storage: ProjectPersistence, sample_video: Path, tmp_path: Path):
-    """Verify that when Prime fails, Sub checkpoint is preserved and reused on retry without re-calling Sub."""
-    project_id = "proj-prime-fail-reuse-sub-01"
-    output_dir = tmp_path / "outputs"
-
-    valid_response_json = {
-        "schema_version": "3.0",
-        "project_id": project_id,
-        "project_name": "Prime_Fail_Project",
-        "sources": [{"source_file": "ep01.mp4"}],
-        "outputs": [
-            {
-                "render_id": "render-01",
-                "title": "Recap_Retry",
-                "segments": [
-                    {
-                        "segment_id": "seg-1",
-                        "source_file": "ep01.mp4",
-                        "start_ms": 0,
-                        "end_ms": 1000,
-                        "type": "original_dialogue",
-                        "narration": "",
-                        "source_audio": True,
-                        "subtitles": [],
-                    }
-                ],
-            }
-        ],
-    }
-
-    raw_sub_freetext = "Sub analysis extracted successfully from video."
-    raw_prime_json = f"```json\n{json.dumps(valid_response_json)}\n```"
-
-    mock_gw = MagicMock(spec=GatewayClient)
-    mock_gw.submit_chat_analysis.return_value = GatewayResult(
-        raw_response=raw_sub_freetext,
-        parsed_json=None,
-        model="sub",
-    )
-    # Prime fails on first attempt
-    mock_gw.submit_text_chat.side_effect = InvalidGatewayResponseError("Prime JSON generation failed", raw_response="bad json")
-
-    workflow = ProjectWorkflow(
-        persistence=test_storage,
-        gateway_client=mock_gw,
-    )
-
-    workflow.create_project(
-        project_id=project_id,
-        project_name="Prime_Fail_Project",
+        project_name="Negative_Test_Project",
         source_input=sample_video,
         prompt="Test prompt",
         output_dir=output_dir,
     )
 
-    with pytest.raises(InvalidGatewayResponseError):
+    with pytest.raises(AnalysisPipelineUnavailableError):
         workflow.start_project(project_id)
 
-    # Invariants after Prime failure:
-    assert mock_gw.submit_chat_analysis.call_count == 1
-    assert mock_gw.submit_text_chat.call_count == 1
-    # Sub analysis is safely checkpointed to disk
-    assert test_storage.has_sub_analysis(project_id) is True
-    assert test_storage.load_sub_analysis(project_id) == raw_sub_freetext
-    assert test_storage.has_final_json(project_id) is False
+    # Negative assertions: zero Gateway calls
+    assert mock_gw.submit_text_chat.call_count == 0
+    assert not hasattr(mock_gw, "submit_chat_analysis")
+    assert not hasattr(mock_gw, "validate_model_video_capability")
+    # Checkpoints not created
+    assert test_storage.has_sub_analysis(project_id) is False
+    assert test_storage.has_raw_response(project_id) is False
 
-    # Second attempt: Prime succeeds
-    mock_gw.submit_text_chat.side_effect = None
-    mock_gw.submit_text_chat.return_value = GatewayResult(
-        raw_response=raw_prime_json,
-        parsed_json=valid_response_json,
-        model="prime",
+
+def test_resume_without_final_json_fails_analysis_unavailable(test_storage: ProjectPersistence, sample_video: Path, tmp_path: Path):
+    """Verify that resuming a project that has no Final JSON fails immediately with AnalysisPipelineUnavailableError and zero AI calls."""
+    project_id = "proj-resume-no-final-json-01"
+    output_dir = tmp_path / "outputs"
+
+    mock_gw = MagicMock(spec=GatewayClient)
+    workflow = ProjectWorkflow(persistence=test_storage, gateway_client=mock_gw)
+    workflow.create_project(
+        project_id=project_id,
+        project_name="Resume_No_Final_Project",
+        source_input=sample_video,
+        prompt="Test prompt",
+        output_dir=output_dir,
     )
 
-    def mock_render(*args, **kwargs):
-        out_mp4 = output_dir / "Recap_Retry.mp4"
-        out_mp4.parent.mkdir(parents=True, exist_ok=True)
-        out_mp4.write_bytes(b"dummy mp4")
-        return RenderResult(
-            output_path=out_mp4,
-            narration_srt_path=output_dir / "Recap_Retry.narration.srt",
-            original_srt_path=output_dir / "Recap_Retry.original.srt",
-            duration=1.0,
-            title="Recap_Retry",
-            render_id="render-01",
-            video_codec="h264",
-            audio_codec="aac",
-            width=640,
-            height=480,
-            fps=25.0,
-        )
+    with pytest.raises(AnalysisPipelineUnavailableError):
+        workflow.resume_project(project_id)
 
-    with patch("toolrecap_v4.workflow.render_output", side_effect=mock_render):
-        retried_state = workflow.start_project(project_id)
-
-    # Invariant: Sub model was NOT called again (call count is still 1 from first attempt)
-    assert mock_gw.submit_chat_analysis.call_count == 1
-    # Prime model was called again (call count is 2)
-    assert mock_gw.submit_text_chat.call_count == 2
-
-    # Checkpoint final JSON now saved and project completed
-    assert test_storage.has_final_json(project_id) is True
-    assert retried_state["status"] == ProjectStatus.COMPLETED.value
+    assert mock_gw.submit_text_chat.call_count == 0
+    state = test_storage.load_project(project_id)
+    assert state["status"] == ProjectStatus.FAILED.value
 
 
 def test_dual_stage_render_retry_zero_ai(test_storage: ProjectPersistence, sample_video: Path, tmp_path: Path):
-    """Verify that retrying after render failure makes 0 AI calls (both Sub and Prime)."""
+    """Verify that retrying after render failure makes 0 AI calls."""
     project_id = "proj-render-fail-retry-01"
     output_dir = tmp_path / "outputs"
 
@@ -1195,27 +1021,16 @@ def test_dual_stage_render_retry_zero_ai(test_storage: ProjectPersistence, sampl
     }
 
     mock_gw = MagicMock(spec=GatewayClient)
-    mock_gw.submit_chat_analysis.return_value = GatewayResult(
-        raw_response="Sub video analysis.",
-        parsed_json=None,
-        model="sub",
-    )
-    mock_gw.submit_text_chat.return_value = GatewayResult(
-        raw_response=json.dumps(valid_response_json),
-        parsed_json=valid_response_json,
-        model="prime",
-    )
-
     workflow = ProjectWorkflow(
         persistence=test_storage,
         gateway_client=mock_gw,
     )
 
-    workflow.create_project(
+    workflow.import_project(
         project_id=project_id,
         project_name="Render_Retry_Project",
         source_input=sample_video,
-        prompt="Test prompt",
+        final_json=valid_response_json,
         output_dir=output_dir,
     )
 
@@ -1226,12 +1041,7 @@ def test_dual_stage_render_retry_zero_ai(test_storage: ProjectPersistence, sampl
 
     # Final JSON was saved BEFORE render
     assert test_storage.has_final_json(project_id) is True
-    assert mock_gw.submit_chat_analysis.call_count == 1
-    assert mock_gw.submit_text_chat.call_count == 1
-
-    # Reset mock call counts to verify retry makes ZERO AI calls
-    mock_gw.submit_chat_analysis.reset_mock()
-    mock_gw.submit_text_chat.reset_mock()
+    assert mock_gw.submit_text_chat.call_count == 0
 
     def mock_render_success(*args, **kwargs):
         out_mp4 = output_dir / "Recap_Render_Fail.mp4"
@@ -1254,7 +1064,31 @@ def test_dual_stage_render_retry_zero_ai(test_storage: ProjectPersistence, sampl
     with patch("toolrecap_v4.workflow.render_output", side_effect=mock_render_success):
         resumed_state = workflow.resume_project(project_id)
 
-    # Invariant: ZERO AI calls on retry (Sub: 0, Prime: 0)
-    assert mock_gw.submit_chat_analysis.call_count == 0
+    # Invariant: ZERO AI calls on retry
     assert mock_gw.submit_text_chat.call_count == 0
     assert resumed_state["status"] == ProjectStatus.COMPLETED.value
+
+
+def test_production_boundary_no_deleted_apis():
+    """Verify that whole-video production APIs are absent and zero calls occur across boundaries."""
+    import toolrecap_v4
+    import toolrecap_v4.gateway as gw
+
+    # 1. Whole-video types and constants absent from root and gateway
+    assert not hasattr(toolrecap_v4, "StreamingChatPayload")
+    assert not hasattr(toolrecap_v4, "DEFAULT_MAX_FILE_SIZE_BYTES")
+    assert not hasattr(toolrecap_v4, "SUPPORTED_VIDEO_EXTENSIONS")
+    assert not hasattr(gw, "StreamingChatPayload")
+    assert not hasattr(gw, "DEFAULT_MAX_FILE_SIZE_BYTES")
+    assert not hasattr(gw, "SUPPORTED_VIDEO_EXTENSIONS")
+
+    # 2. Whole-video methods absent from GatewayClient
+    assert not hasattr(gw.GatewayClient, "submit_chat_analysis")
+    assert not hasattr(gw.GatewayClient, "validate_model_video_capability")
+    assert not hasattr(gw.GatewayClient, "validate_model_prime_capability")
+
+    # 3. Safe image and error exports present on root
+    assert hasattr(toolrecap_v4, "AnalysisPipelineUnavailableError")
+    assert hasattr(toolrecap_v4, "validate_and_reencode_image")
+    assert hasattr(toolrecap_v4, "DEFAULT_MAX_IMAGE_BYTES")
+    assert hasattr(toolrecap_v4, "GatewayConnectionError")
