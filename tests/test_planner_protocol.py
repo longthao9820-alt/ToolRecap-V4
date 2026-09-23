@@ -13,6 +13,8 @@ from toolrecap_v4.analysis.finalizer.planner import (
     parse_planner_json,
     planner_dependency_signature,
     validate_planner_action,
+    build_planner_repair_prompt,
+    planner_response_contract,
 )
 from toolrecap_v4.analysis.finalizer.packing import unpack_catalog
 from toolrecap_v4.errors import PlannerResponseError, PlannerValidationError
@@ -76,6 +78,56 @@ def test_initial_prompt_preserves_raw_prompt_and_complete_catalog(catalog):
     assert "C:/media" not in encoded and "C:\\media" not in encoded
     for forbidden in ("video data", "VoiceStudio", "Candidate Discovery", "Season Connection"):
         assert forbidden not in encoded
+
+
+def test_real_season_draft_shape_is_repaired_against_explicit_contract(catalog):
+    """Regression for a complete JSON draft returned with the wrong transport/schema shape."""
+    legacy_shape = {
+        "protocol_version": "planner-draft-v1",
+        "action": "PLANNER_DRAFT",
+        "round_id": "round-001",
+        "project_id": "project-1",
+        "catalog_identity": {
+            "catalog_hash": catalog.catalog_hash,
+            "evidence_revision": catalog.evidence_revision,
+            "catalog_item_count": len(catalog.items),
+            "catalog_ids_digest": catalog.completeness.ids_digest,
+        },
+        "draft": {
+            "mode": "season",
+            "language": "en-US",
+            "source_scope": ["E01", "E02"],
+            "output_count": 2,
+            "season_strategy": "Follow the evidence.",
+            "concepts": [{
+                "priority": 1, "working_title": "A factual arc", "type": "event",
+                "episodes": ["E01"], "central_question": "What happened?",
+                "story_shape": ["setup"], "target_duration_seconds": [30, 60],
+                "hook_candidates": [], "evidence_anchors": ["E01-EV-001"],
+                "payoff": "The event is resolved.", "editorial_boundary": "Stay factual.",
+            }],
+            "cross_output_controls": [], "coverage_decisions": [],
+        },
+    }
+    with pytest.raises(PlannerValidationError) as exc_info:
+        validate_planner_action(legacy_shape, project_id="project-1", round_id="round-001", catalog=catalog)
+    assert {"protocol_version", "catalog_hash", "draft_root", "draft_fields"}.issubset(exc_info.value.issue_codes)
+
+    prompt = build_initial_planner_prompt(
+        project_id="project-1", round_id="round-001", raw_recap_prompt="raw", catalog=catalog,
+    )
+    payload = json.loads(prompt)
+    assert payload["response_contract"] == planner_response_contract()
+    assert any("Return one JSON object only" in rule for rule in payload["response_contract"]["rules"])
+    assert "draft_version" in payload["response_contract"]["PLANNER_DRAFT"]["draft"]
+
+    canonical = draft_response(catalog)
+    assert validate_planner_action(canonical, project_id="project-1", round_id="round-001", catalog=catalog).draft is not None
+    repair = json.loads(build_planner_repair_prompt(
+        original_prompt=prompt, invalid_response=json.dumps(legacy_shape),
+        validation_errors=tuple(sorted(exc_info.value.issue_codes)),
+    ))
+    assert repair["response_contract"] == planner_response_contract()
 
 
 def test_request_action_strictly_validates_ids_and_ranges(catalog):
