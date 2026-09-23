@@ -238,6 +238,17 @@ class FinalPlannerValidationError(SeasonPlanError): pass
 class SeasonPlanLockError(SeasonPlanError): pass
 
 
+class WriterError(ToolRecapError): pass
+class WriterContextError(WriterError): pass
+class WriterEvidenceError(WriterContextError): pass
+class WriterVisualEvidenceError(WriterContextError): pass
+class WriterCapacityError(WriterError): pass
+class WriterTransportError(WriterError): pass
+class WriterResponseError(WriterError): pass
+class WriterPersistenceError(WriterError): pass
+class WriterRevisionError(WriterError): pass
+
+
 class CancelledError(ToolRecapError):
     """Raised when an operation is cancelled."""
 

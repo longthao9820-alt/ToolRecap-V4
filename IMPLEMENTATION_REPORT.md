@@ -1,12 +1,12 @@
-# ToolRecap V4 — Implementation & Verification Report (Phase 7 Selective Visual Evidence & Season Plan)
+# ToolRecap V4 — Implementation & Verification Report (Phase 8 Independent Per-Output Writers)
 
 **Date**: 2026-09-22  
-**Contract**: Phase 7 — Selective Visual Evidence + Final Season Plan Lock
+**Contract**: Phase 8 — Independent Per-Output Writers + Writer Draft Checkpoints
 **Project**: ToolRecap V4  
 **Target Platform**: Windows 10/11 x64 Portable  
 **Version**: v4.0.0  
-**Phase**: Phase 7 — Planner-Requested Vision, Visual Evidence & Locked Season Plan
-**Status**: Phase 7 IMPLEMENTED; deterministic visual/plan tests and prior-phase regressions verified. Phase 8 has not started.
+**Phase**: Phase 8 — Authoritative Writer Context, Independent Execution & Response Capture
+**Status**: Phase 8 IMPLEMENTED; Writer response artifacts stop before Phase 9 validation/repair/merge.
 
 ---
 
@@ -22,6 +22,18 @@ This report documents the implementation and closure verification of **Phase 7**
 - **Phase 5 (Complete Season Evidence Catalog)**: Added one-to-one full-evidence projection, technical completeness ledger, deterministic IDs digest and Catalog hash, exact structural pack/unpack, capacity metrics, atomic persistence/cache, corruption recovery, and `CATALOG_READY` workflow integration with zero AI calls.
 - **Phase 6 (Season Planner Draft)**: Added verbatim raw-prompt delivery, complete Catalog transport, provider-neutral Planner configuration, exact ID/range Evidence fetch, strict two-action protocol, bounded repair/rounds, raw-response recovery, atomic session reuse, technically validated draft outputs/visual requests and `PLANNER_DRAFT_READY` workflow integration.
 - **Phase 7 (Selective Visual Evidence & Season Plan)**: Added deterministic Planner-requested range IDs, local bounded frame extraction, safe still-image Vision, factual Visual Evidence, empty-visual completion, final Planner refinement, deterministic application-owned output IDs, immutable locked `season_plan.json`, cache reuse and `SEASON_PLAN_READY` workflow integration.
+- **Phase 8 (Independent Writers)**: Added deterministic Writer jobs from locked `out_###` entries, authoritative Full/Visual Evidence context, verbatim raw prompt, provider-neutral text-only requests, bounded parallelism, per-output raw checkpoints/cache/resume, best-effort structured extraction and `WRITER_DRAFTS_READY` workflow integration.
+
+### Exact Scope Executed in Phase 8
+
+1. Exactly one independent Writer job per locked Season Plan output; zero-output plans make zero Writer calls.
+2. Context validates locked plan hash/order, output entry, canonical episodes/sources/ranges, authoritative Evidence Store objects and active Visual Evidence.
+3. Every request preserves the raw prompt verbatim and supplies all locked target Evidence/Visual Evidence without ranking, truncation, frames or media.
+4. Provider-neutral model/reasoning, actual serialized request-byte preflight, explicit capacity failures and finite worker-pool scheduling.
+5. Full raw response is checkpointed before parsing; oversized truncated diagnostics never count as complete production responses.
+6. Per-output cache/recovery and independent retries preserve successful sibling outputs across failures/restarts.
+7. Best-effort parse state is recorded without semantic repair, corrected content, merge or production Final JSON.
+8. Workflow reaches `WRITER_DRAFTS_READY` and stops before Phase 9; no VoiceStudio, Audio Mix, render or publish operation occurs.
 
 ### Exact Scope Executed in Phase 6
 
@@ -114,7 +126,7 @@ This report documents the implementation and closure verification of **Phase 7**
 | **Memory Boundedness** | `ENFORCED` | Audio energy reads 4096-frame chunks; no full WAV in memory. Image OCR operates on bounded subtitle crops, never full video frames. |
 | **Stream Indexing Integrity** | `ENFORCED` | `AudioSelection` maintains separate `global_index` and `audio_ordinal`. Error raised if map spec requested on missing audio. |
 | **Editorial Independence** | `CLEAN` | No editorial policy classes, cue-capping heuristics, or arbitrary time clamping injected into analysis/preparation. |
-| **Controlled Workflow Boundary**| `VERIFIED` | Fully configured analysis reaches `ProjectStatus.SEASON_PLAN_READY` and stops before Phase 8; missing Vision configuration with required ranges stops at `PLANNER_DRAFT_READY`. |
+| **Controlled Workflow Boundary**| `VERIFIED` | Fully configured analysis reaches `ProjectStatus.WRITER_DRAFTS_READY` and stops before Phase 9; missing Writer configuration stops at `SEASON_PLAN_READY`. |
 | **Scanner Editorial Isolation** | `VERIFIED` | Scanner receives no Recap Prompt, application ranking policy, candidate logic, output quota, video, whole audio, or arbitrary local path. |
 | **Stable Evidence Identity** | `VERIFIED` | IDs are application-owned, deterministic after sorted validated chunk artifacts, and scoped by project + evidence revision. |
 | **Full Evidence Retention** | `VERIFIED` | Range queries return every overlap in deterministic order; no top-K, fuzzy dedupe, story ranking, or character/subplot filtering. |
@@ -140,7 +152,7 @@ All validation suites executed and passed cleanly:
   - Result: 100% clean compilation across all modules and tests, 0 syntax or compilation errors.
 - **Module Import Verification**:
   - Command: `pkgutil.walk_packages` across `toolrecap_v4`
-  - Result: All 68 current submodules cleanly imported without error after Phase 7.
+  - Result: All 71 current submodules cleanly imported without error after Phase 8.
 - **Full Pytest Suite**:
   - Command: `pytest --basetemp="C:\Users\Long\AppData\Local\Temp\kilo\pytest_v4_phase3_run"`
    - Phase 2 baseline: **237 passed**.
@@ -154,6 +166,8 @@ All validation suites executed and passed cleanly:
 - Phase 6 focused coverage: **35 Planner protocol/fetch/service tests**, two Planner settings tests, and updated workflow boundary/bypass assertions.
 - Phase 7 closure full suite: **481 passed in 53.68s**, 0 failures, 0 errors, 0 skipped.
 - Phase 7 focused coverage: **28 targeted visual request/frame/Vision/cache/plan-lock tests** plus updated workflow assertions.
+- Phase 8 final full suite: **496 passed in 58.15s**, 0 failures, 0 errors, 0 skipped.
+- Phase 8 focused coverage: **15 independent Writer context/execution/cache/response-boundary tests** plus updated workflow/bypass assertions.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
   - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
@@ -211,10 +225,10 @@ All validation suites executed and passed cleanly:
 
 ---
 
-## 4. Explicit Limitations & Boundaries (Phase 8+ Scope)
+## 4. Explicit Limitations & Boundaries (Phase 9+ Scope)
 
 - **General scene Vision boundary**: Selective Planner-requested still-image Vision is implemented in Phase 7. Full-episode/season scans, video upload and arbitrary sampling remain prohibited.
-- **Output Writers and Final JSON**: NOT implemented. Workflow stops at `ProjectStatus.SEASON_PLAN_READY` before Phase 8; no narration, Writer output, schema 3.0 Final JSON, voice or render is produced from the plan.
+- **Writer validation/repair and Final JSON**: NOT implemented. Phase 8 captures Writer responses and draft parse status only; Phase 9 owns semantic validation, AI repair, deterministic merge and production Final JSON.
 - **Output Writers & Output Directory Resolver**: NOT implemented. Final JSON generation currently only accepts imported/pre-existing schemas.
 - **Executable Packaging**: Portable binary packaging via `build_portable.py` / PyInstaller was not run; no `dist/ToolRecapV4.exe` exists in this phase.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.

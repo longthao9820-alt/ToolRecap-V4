@@ -84,6 +84,13 @@ class AppSettings:
     vision_hard_frame_cap: int = 256
     vision_repair_attempts: int = 1
 
+    # Phase 8 independent provider-neutral per-output Writers.
+    writer_model: str = ""
+    writer_reasoning: str = ""
+    writer_parallelism: int = 3
+    writer_max_request_bytes: int | None = None
+    writer_max_response_bytes: int = 10 * 1024 * 1024
+
     # Notifications (all defaults ON)
     notify_complete: bool = True
     notify_error: bool = True
@@ -128,6 +135,12 @@ class AppSettings:
             raise ValueError("Vision frame budgets must be positive")
         if self.vision_repair_attempts < 0:
             raise ValueError("vision_repair_attempts must be non-negative")
+        if self.writer_parallelism < 1:
+            raise ValueError("writer_parallelism must be at least 1")
+        if self.writer_max_request_bytes is not None and self.writer_max_request_bytes < 1024:
+            raise ValueError("writer_max_request_bytes must be null or at least 1024")
+        if self.writer_max_response_bytes < 1024:
+            raise ValueError("writer_max_response_bytes must be at least 1024")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert settings to dictionary."""
@@ -149,6 +162,10 @@ class AppSettings:
             data_copy["planner_reasoning"] = str(data_copy.get("gateway_prime_reasoning") or "")
         if "vision_model" not in data_copy:
             data_copy["vision_model"] = str(data_copy.get("scanner_model") or data_copy.get("gateway_sub_model") or "")
+        if "writer_model" not in data_copy:
+            data_copy["writer_model"] = str(data_copy.get("planner_model") or data_copy.get("gateway_prime_model") or "")
+        if "writer_reasoning" not in data_copy:
+            data_copy["writer_reasoning"] = str(data_copy.get("planner_reasoning") or data_copy.get("gateway_prime_reasoning") or "")
         # Migrate legacy single gateway_model to dual sub/prime defaults
         if "gateway_model" in data_copy and "gateway_sub_model" not in data_copy:
             old_model = data_copy.get("gateway_model")

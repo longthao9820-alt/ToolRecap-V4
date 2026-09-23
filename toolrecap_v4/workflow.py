@@ -30,7 +30,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from toolrecap_v4.analysis.cache import AnalysisCacheManager
-from toolrecap_v4.analysis.finalizer import CatalogService, PlannerConfig, PlannerService, SeasonPlanService
+from toolrecap_v4.analysis.finalizer import CatalogService, PlannerConfig, PlannerService, SeasonPlanService, WriterConfig, WriterService
 from toolrecap_v4.analysis.vision import FrameExtractionPolicy, VisionConfig, VisualEvidenceService
 from toolrecap_v4.analysis.models import PreparedEpisode
 from toolrecap_v4.analysis.scanner import ScannerChunkPolicy, ScannerConfig, ScannerService
@@ -84,6 +84,7 @@ class ProjectStatus(str, enum.Enum):
     CATALOG_READY = "catalog_ready"
     PLANNER_DRAFT_READY = "planner_draft_ready"
     SEASON_PLAN_READY = "season_plan_ready"
+    WRITER_DRAFTS_READY = "writer_drafts_ready"
     RENDERING = "rendering"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -127,6 +128,7 @@ class WorkflowCallbacks:
     on_catalog_ready: Optional[Callable[[str, Dict[str, Any]], None]] = None
     on_planner_draft_ready: Optional[Callable[[str, Dict[str, Any]], None]] = None
     on_season_plan_ready: Optional[Callable[[str, Dict[str, Any]], None]] = None
+    on_writer_drafts_ready: Optional[Callable[[Dict[str, Any]], None]] = None
 
 
 def resolve_sources(
@@ -337,7 +339,14 @@ def reconcile_project_state(
                         plan_checkpoint = persistence.load_checkpoint(project_id, "season_plan")
                     except PersistenceError:
                         plan_checkpoint = None
-                    project_state["status"] = ProjectStatus.SEASON_PLAN_READY.value if plan_checkpoint and plan_checkpoint.get("status") == "completed" else ProjectStatus.PLANNER_DRAFT_READY.value
+                    try:
+                        writer_checkpoint = persistence.load_checkpoint(project_id, "writer_drafts")
+                    except PersistenceError:
+                        writer_checkpoint = None
+                    if writer_checkpoint and writer_checkpoint.get("status") == "completed":
+                        project_state["status"] = ProjectStatus.WRITER_DRAFTS_READY.value
+                    else:
+                        project_state["status"] = ProjectStatus.SEASON_PLAN_READY.value if plan_checkpoint and plan_checkpoint.get("status") == "completed" else ProjectStatus.PLANNER_DRAFT_READY.value
                 else:
                     project_state["status"] = ProjectStatus.CATALOG_READY.value
             elif evidence_checkpoint and evidence_checkpoint.get("status") == "completed":
@@ -370,6 +379,7 @@ class ProjectWorkflow:
         planner_service: Optional[PlannerService] = None,
         visual_service: Optional[VisualEvidenceService] = None,
         season_plan_service: Optional[SeasonPlanService] = None,
+        writer_service: Optional[WriterService] = None,
     ) -> None:
         self.persistence = persistence or ProjectPersistence(storage_root=storage_root)
         self.settings_manager = settings_manager or SettingsManager(persistence=self.persistence)
@@ -381,6 +391,7 @@ class ProjectWorkflow:
         self.planner_service = planner_service
         self.visual_service = visual_service
         self.season_plan_service = season_plan_service
+        self.writer_service = writer_service
 
     def create_project(
         self,
@@ -985,9 +996,21 @@ class ProjectWorkflow:
                 state["status"]=ProjectStatus.SEASON_PLAN_READY.value;state["season_plan"]=plan_summary;state["error"]=phase8_msg;state.setdefault("timestamps",{})["season_plan_ready_at"]=now_plan;state["timestamps"]["updated_at"]=now_plan;self.persistence.save_project(state)
                 if callbacks and callbacks.on_season_plan_ready:callbacks.on_season_plan_ready(plan_result.plan.plan_hash,plan_summary)
                 if callbacks and callbacks.on_status_change:callbacks.on_status_change(ProjectStatus.SEASON_PLAN_READY.value)
-                phase8_err=AnalysisPipelineUnavailableError(phase8_msg)
-                if callbacks and callbacks.on_error:callbacks.on_error(phase8_err,None)
-                raise phase8_err
+                writer_service=self.writer_service
+                if writer_service is None and cfg.writer_model.strip():writer_service=WriterService(self.gateway_client,self.persistence.root,WriterConfig(cfg.writer_model,cfg.writer_reasoning,cfg.writer_parallelism,cfg.writer_max_request_bytes,cfg.writer_max_response_bytes))
+                if writer_service is None:
+                    phase8_err=AnalysisPipelineUnavailableError(phase8_msg)
+                    if callbacks and callbacks.on_error:callbacks.on_error(phase8_err,None)
+                    raise phase8_err
+                writer_result=writer_service.run(project_id=project_id,raw_prompt=state.get("prompt",""),language=cfg.recap_language,plan=plan_result.plan,episodes=prepared_models,visual=visual_result,cancellation_token=cancellation_token)
+                writer_summary={"status":"completed","season_plan_hash":plan_result.plan.plan_hash,"expected_output_count":len(plan_result.plan.outputs),"completed_response_count":len(writer_result.artifacts),"reused_count":writer_result.reused_count,"requested_count":writer_result.requested_count,"completed_at":datetime.now(timezone.utc).isoformat()}
+                self.persistence.save_checkpoint(project_id,"writer_drafts",writer_summary);now_w=datetime.now(timezone.utc).isoformat();phase9_msg="Analysis pipeline stopped: per-output Writer responses are ready (WRITER_DRAFTS_READY); Phase 9 validation/repair/merge is not implemented."
+                state["status"]=ProjectStatus.WRITER_DRAFTS_READY.value;state["writer_drafts"]=writer_summary;state["error"]=phase9_msg;state.setdefault("timestamps",{})["writer_drafts_ready_at"]=now_w;state["timestamps"]["updated_at"]=now_w;self.persistence.save_project(state)
+                if callbacks and callbacks.on_writer_drafts_ready:callbacks.on_writer_drafts_ready(writer_summary)
+                if callbacks and callbacks.on_status_change:callbacks.on_status_change(ProjectStatus.WRITER_DRAFTS_READY.value)
+                phase9_err=AnalysisPipelineUnavailableError(phase9_msg)
+                if callbacks and callbacks.on_error:callbacks.on_error(phase9_err,None)
+                raise phase9_err
 
             # Step 2: Source integrity check (source changes fail no substitution)
             verify_source_integrity(state["source_fingerprints"], cancellation_token=cancellation_token)

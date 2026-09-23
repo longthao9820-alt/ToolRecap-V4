@@ -1415,6 +1415,8 @@ class SettingsDialog(tk.Toplevel):
             self.settings.gateway_prime_reasoning = self.var_gw_prime_reasoning.get().strip()
             self.settings.planner_model = self.settings.gateway_prime_model
             self.settings.planner_reasoning = self.settings.gateway_prime_reasoning
+            self.settings.writer_model = self.settings.gateway_prime_model
+            self.settings.writer_reasoning = self.settings.gateway_prime_reasoning
             self.settings.gateway_model = self.settings.gateway_sub_model
             self.settings.gateway_thinking = bool(self.settings.gateway_sub_reasoning or self.settings.gateway_prime_reasoning)
 

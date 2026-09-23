@@ -32,6 +32,8 @@ from .planner import (
 )
 from .planner_service import PlannerConfig, PlannerRunResult, PlannerService
 from .season_plan import SeasonPlan, SeasonPlanResult, SeasonPlanService
+from .writer import WriterArtifact, WriterJob, WriterRunResult, assemble_writer_jobs, build_writer_prompt
+from .writer_service import WriterConfig, WriterService
 
 __all__ = [
     "CATALOG_PROJECTION_VERSION",
@@ -60,6 +62,13 @@ __all__ = [
     "SeasonPlan",
     "SeasonPlanResult",
     "SeasonPlanService",
+    "WriterArtifact",
+    "WriterConfig",
+    "WriterJob",
+    "WriterRunResult",
+    "WriterService",
+    "assemble_writer_jobs",
+    "build_writer_prompt",
     "SeasonEvidenceCatalog",
     "canonical_catalog_bytes",
     "catalog_detail_hash",
