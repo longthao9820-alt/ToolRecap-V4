@@ -180,6 +180,8 @@ def build() -> None:
         "required_files": [
             "ToolRecapV4.exe", "ffmpeg.exe", "ffprobe.exe",
             "FFMPEG_LICENSE.txt", "schemas/recap_v3_schema.json",
+            "_internal/base_library.zip",
+            f"_internal/python{sys.version_info.major}{sys.version_info.minor}.dll",
         ],
         "bundled_models": False,
         "user_state_bundled": False,

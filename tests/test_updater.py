@@ -40,7 +40,8 @@ def _write_valid_package(package_dir: Path, version: str = "4.1.0") -> Path:
     package_dir.mkdir(parents=True, exist_ok=True)
     (package_dir / "ToolRecapV4.exe").write_bytes(b"MZfakeexe")
     (package_dir / "_internal").mkdir(exist_ok=True)
-    (package_dir / "_internal" / "runtime.dll").write_bytes(b"runtime")
+    (package_dir / "_internal" / "base_library.zip").write_bytes(b"python standard library")
+    (package_dir / "_internal" / "python312.dll").write_bytes(b"python runtime")
     (package_dir / "ffmpeg.exe").write_bytes(b"MZfakeffmpeg")
     (package_dir / "ffprobe.exe").write_bytes(b"MZfakeffprobe")
     (package_dir / "FFMPEG_LICENSE.txt").write_text("license", encoding="utf-8")
@@ -55,6 +56,7 @@ def _write_valid_package(package_dir: Path, version: str = "4.1.0") -> Path:
         "required_files": [
             "ToolRecapV4.exe", "ffmpeg.exe", "ffprobe.exe",
             "FFMPEG_LICENSE.txt", "schemas/recap_v3_schema.json",
+            "_internal/base_library.zip", "_internal/python312.dll",
         ],
     }
     (package_dir / "package_marker.json").write_text(json.dumps(marker), encoding="utf-8")

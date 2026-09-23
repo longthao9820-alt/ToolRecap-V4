@@ -24,11 +24,13 @@ def _package_files(version: str = "4.1.0") -> dict[str, bytes]:
         "required_files": [
             "ToolRecapV4.exe", "ffmpeg.exe", "ffprobe.exe",
             "FFMPEG_LICENSE.txt", "schemas/recap_v3_schema.json",
+            "_internal/base_library.zip", "_internal/python312.dll",
         ],
     }
     return {
         "ToolRecapV4.exe": b"MZ-new-executable",
-        "_internal/runtime.dll": b"runtime",
+        "_internal/base_library.zip": b"python standard library",
+        "_internal/python312.dll": b"python runtime",
         "ffmpeg.exe": b"MZ-ffmpeg",
         "ffprobe.exe": b"MZ-ffprobe",
         "FFMPEG_LICENSE.txt": b"license",
@@ -122,6 +124,36 @@ def test_package_audit_rejects_user_state_and_requires_runtime_layout(tmp_path):
     forbidden.write_bytes(b"must-not-ship")
     with pytest.raises(PackageValidationError, match="forbidden"):
         validate_package(package)
+
+
+def test_package_without_python_runtime_is_rejected(tmp_path):
+    package = tmp_path / "package"
+    for name, content in _package_files().items():
+        path = package / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    (package / "_internal" / "python312.dll").unlink()
+    with pytest.raises(PackageValidationError, match="Python runtime DLL"):
+        validate_package(package)
+
+
+@pytest.mark.parametrize(("tag", "expected"), [
+    ("v4.1.0", "update_available"),
+    ("v4.0.0", "up_to_date"),
+    ("v3.9.9", "up_to_date"),
+    ("invalid-version", "error"),
+])
+def test_release_semver_statuses(tmp_path, tag, expected):
+    release = {
+        "tag_name": tag,
+        "assets": [
+            {"name": "ToolRecapV4-v4.1.0-windows-portable.zip", "browser_download_url": "https://example.test/package.zip"},
+            {"name": "ToolRecapV4-v4.1.0-windows-portable.zip.sha256.txt", "browser_download_url": "https://example.test/package.sha256.txt"},
+        ],
+    }
+    client = httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=release)))
+    manager = UpdateManager(storage_root=tmp_path / "state", client=client, current_version="4.0.0")
+    assert manager.check_for_updates("example/toolrecap").status == expected
 
 
 @pytest.mark.parametrize("entry", [

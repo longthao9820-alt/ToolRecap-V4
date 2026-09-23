@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Optional
 
 from toolrecap_v4.errors import PackageValidationError
@@ -51,8 +52,16 @@ def validate_package(package_dir: Path, expected_version: Optional[str] = None) 
     exe = find_executable(package_dir, ["ToolRecapV4.exe", "toolrecapv4.exe", "toolrecap_v4.exe"])
     if not exe:
         raise PackageValidationError("Package is missing main executable 'ToolRecapV4.exe'")
-    if not (package_dir / "_internal").is_dir():
+    runtime_dir = package_dir / "_internal"
+    if not runtime_dir.is_dir():
         raise PackageValidationError("Package is missing PyInstaller one-folder runtime '_internal'")
+    if not (runtime_dir / "base_library.zip").is_file():
+        raise PackageValidationError("Package is missing _internal/base_library.zip")
+    if not any(
+        path.is_file() and re.fullmatch(r"python\d+\.dll", path.name.casefold())
+        for path in runtime_dir.iterdir()
+    ):
+        raise PackageValidationError("Package is missing Python runtime DLL in _internal")
     if not find_executable(package_dir, ["ffmpeg.exe"]):
         raise PackageValidationError("Package is missing 'ffmpeg.exe'")
     if not find_executable(package_dir, ["ffprobe.exe"]):

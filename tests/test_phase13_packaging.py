@@ -63,6 +63,13 @@ def test_structured_selfcheck_is_zero_project_and_secret_redacted(tmp_path, monk
     secrets_dir = state / "secrets"
     secrets_dir.mkdir()
     secrets_dir.joinpath("credentials.dpapi").write_bytes(b"TOP-SECRET-CIPHERTEXT")
+    project = state / "projects" / "project.json"
+    final_json = state / "final" / "project.json"
+    narration = state / "projects" / "project" / "downstream" / "voice" / "segment.wav"
+    for path, content in ((project, b"project state"), (final_json, b"final json"), (narration, b"voice cache")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    preserved = {path: path.read_bytes() for path in (project, final_json, narration)}
     fake_binary = tmp_path / "binary.exe"
     fake_binary.write_bytes(b"binary")
     monkeypatch.setattr("toolrecap_v4.selfcheck._binary_version", lambda _name: (fake_binary, "test version"))
@@ -74,7 +81,7 @@ def test_structured_selfcheck_is_zero_project_and_secret_redacted(tmp_path, monk
     assert result.status in (PASS, WARN)
     assert "TOP-SECRET-CIPHERTEXT" not in payload
     assert '"api_key": "configured"' in payload
-    assert not (state / "projects").exists()
+    assert all(path.read_bytes() == content for path, content in preserved.items())
     assert not (state / "outputs").exists()
     assert any(item.id == "resources.schema" and item.status == PASS for item in result.checks)
     assert any(item.id == "ocr.runtime" and item.status == PASS for item in result.checks)
