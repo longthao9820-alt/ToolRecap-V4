@@ -21,6 +21,7 @@ import copy
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -209,15 +210,24 @@ def build_two_pass_loudnorm_filter(
     input_i = measured.get("input_i", "")
     target_offset = measured.get("target_offset", "")
 
-    if not input_i or input_i == "-inf" or target_offset == "inf":
+    if not input_i:
         return f"loudnorm=I={target_lufs}:TP={true_peak}"
 
     try:
         val = float(input_i)
+        if not math.isfinite(val):
+            return "anull"
         if val <= -70.0:
             return f"loudnorm=I={target_lufs}:TP={true_peak}"
     except ValueError:
         return f"loudnorm=I={target_lufs}:TP={true_peak}"
+
+    if target_offset:
+        try:
+            if not math.isfinite(float(target_offset)):
+                return "anull"
+        except ValueError:
+            return f"loudnorm=I={target_lufs}:TP={true_peak}"
 
     input_lra = measured.get("input_lra", "7.0")
     input_tp = measured.get("input_tp", "-1.0")

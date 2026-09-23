@@ -187,7 +187,7 @@ def test_two_pass_loudnorm_measurement_and_filter(synthetic_sources):
     # Silence handling: fallback filter when input_i is -inf
     silent_measured = {"input_i": "-inf", "target_offset": "inf"}
     safe_filt = build_two_pass_loudnorm_filter(silent_measured, target_lufs=-14.0, true_peak=-1.0)
-    assert safe_filt == "loudnorm=I=-14.0:TP=-1.0"
+    assert safe_filt == "anull"
 
 
 def test_multisource_integration_acceptance(tmp_path: Path, synthetic_sources):

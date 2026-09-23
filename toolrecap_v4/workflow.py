@@ -1155,6 +1155,7 @@ class ProjectWorkflow:
                     "status": OutputStatus.RENDERING.value,
                     "fingerprint": cur_fp,
                     "started_at": datetime.now(timezone.utc).isoformat(),
+                    **({"output_path": str(intended_video)} if checkpoint_owns_destination else {}),
                 }
                 self.persistence.save_checkpoint(project_id, render_id, in_progress_ckpt)
                 outputs_state[render_id] = in_progress_ckpt
@@ -1189,6 +1190,7 @@ class ProjectWorkflow:
                         "error": str(e),
                         "fingerprint": cur_fp,
                         "failed_at": datetime.now(timezone.utc).isoformat(),
+                        **({"output_path": str(intended_video)} if checkpoint_owns_destination else {}),
                     }
                     self.persistence.save_checkpoint(project_id, render_id, fail_ckpt)
                     outputs_state[render_id] = fail_ckpt
