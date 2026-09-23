@@ -308,6 +308,7 @@ class MainWindow(tk.Tk):
         self.discovered_sources: List[SourceFingerprint] = []
         self.current_project_id: Optional[str] = None
         self.current_project_name: Optional[str] = None
+        self._resume_project_ids: Dict[str, str] = {}
         self._output_paths: Dict[str, str] = {}
 
         # Tkinter variables matching V2
@@ -395,6 +396,17 @@ class MainWindow(tk.Tk):
             wraplength=900,
         )
         self.lbl_source.pack(fill="x")
+
+        # Restored projects must remain visible after a fresh application start.
+        self.resume_banner = ttk.Frame(source_box)
+        ttk.Label(self.resume_banner, text="Dự án chưa hoàn thành:").pack(side="left", padx=(0, 8))
+        self.cmb_resume_projects = ttk.Combobox(self.resume_banner, state="readonly", width=54)
+        self.cmb_resume_projects.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.cmb_resume_projects.bind("<<ComboboxSelected>>", self._on_select_resume_project)
+        self.btn_resume_saved = ttk.Button(
+            self.resume_banner, text="⏯ Tiếp tục dự án đã lưu", command=self._on_resume_detected_project,
+        )
+        self.btn_resume_saved.pack(side="left")
 
         # 4. Source Episodes & Queue Table Frame (5 columns)
         queue_frame = ttk.LabelFrame(container, text="Source Episodes & Output Queue", padding=8)
@@ -499,8 +511,6 @@ class MainWindow(tk.Tk):
         # Offscreen logging & stage label for internal message tracking / testing
         self.lbl_stage = ttk.Label(self, textvariable=self.status_var)
         self.txt_log = tk.Text(self, height=1)
-        self.resume_banner = ttk.Frame(self)
-        self.cmb_resume_projects = ttk.Combobox(self.resume_banner, state="readonly")
 
     # -------------------------------------------------------------------------
     # GPU and Updater Background Checks
@@ -651,6 +661,25 @@ class MainWindow(tk.Tk):
         if not self.discovered_sources:
             self.banner.show("Chưa có video nào trong danh sách. Hãy chọn file hoặc thư mục trước.", level="warning")
             return
+
+        selected_paths = {str(Path(source.path).resolve()).casefold() for source in self.discovered_sources}
+        for project in self.persistence.list_projects():
+            if project.get("status") not in {status.value for status in ProjectStatus if status != ProjectStatus.COMPLETED}:
+                continue
+            saved_paths = {
+                str(Path(entry["fingerprint"]["path"]).resolve()).casefold()
+                for entry in project.get("sources", [])
+                if isinstance(entry, dict) and isinstance(entry.get("fingerprint"), dict)
+                and isinstance(entry["fingerprint"].get("path"), str)
+            }
+            if saved_paths and saved_paths == selected_paths:
+                self._check_restart_projects(select_project_id=project["project_id"])
+                self.banner.show(
+                    f"Nguồn này đã thuộc dự án chưa hoàn thành '{project['project_id']}'. "
+                    "Hãy dùng 'Tiếp tục dự án đã lưu'.",
+                    level="warning",
+                )
+                return
 
         self.settings = self.settings_manager.load()
         if not self.settings.prompt.strip():
@@ -831,50 +860,81 @@ class MainWindow(tk.Tk):
     # -------------------------------------------------------------------------
     # RESTARTS / RESUME DETECTION
     # -------------------------------------------------------------------------
-    def _check_restart_projects(self) -> None:
+    def _show_persisted_project(self, project: Dict[str, Any]) -> None:
+        project_id = project["project_id"]
+        self.current_project_id = project_id
+        self.current_project_name = project.get("project_name") or project_id
+        self.discovered_sources.clear()
+        self._output_paths.clear()
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        sources = project.get("sources", [])
+        for index, source in enumerate(sources, start=1):
+            source_name = source.get("source_file", "") if isinstance(source, dict) else ""
+            self.tree.insert(
+                "", "end", iid=f"saved_ep_{index}",
+                values=(str(index), source_name, project.get("status", ""), "", "Đã lưu"),
+            )
+        self.source_var.set(f"Dự án đã lưu: {self.current_project_name} ({len(sources)} video)")
+        self.status_var.set(f"Có thể tiếp tục dự án '{self.current_project_name}' từ checkpoint đã lưu.")
+        self.btn_resume.config(state="normal")
+
+    def _on_select_resume_project(self, _event: Any = None) -> None:
+        project_id = self._resume_project_ids.get(self.cmb_resume_projects.get())
+        if not project_id:
+            return
+        try:
+            self._show_persisted_project(self.persistence.load_project(project_id))
+        except Exception as exc:
+            self.banner.show(f"Không thể nạp dự án đã lưu: {exc}", level="error")
+
+    def _check_restart_projects(self, *, select_project_id: str | None = None) -> None:
         """Detect any unfinished projects from past sessions and offer resume."""
         try:
             projects = self.persistence.list_projects()
-            resumable = []
+            resumable: Dict[str, str] = {}
+            statuses = {status.value for status in ProjectStatus if status != ProjectStatus.COMPLETED}
             for p in projects:
                 status = p.get("status")
-                if status in (
-                    ProjectStatus.CREATED.value,
-                    ProjectStatus.NEW.value,
-                    ProjectStatus.ANALYZING.value,
-                    ProjectStatus.ANALYZED.value,
-                    ProjectStatus.JSON_READY.value,
-                    ProjectStatus.RENDERING.value,
-                    ProjectStatus.CANCELLED.value,
-                    ProjectStatus.FAILED.value,
-                ):
-                    pid = p.get("project_id", "")
-                    pname = p.get("project_name", pid)
-                    resumable.append(f"{pid} ({status})")
+                project_id = p.get("project_id")
+                if status in statuses and isinstance(project_id, str) and project_id:
+                    name = p.get("project_name") or project_id
+                    resumable[f"{name} — {project_id} ({status})"] = project_id
 
             if resumable:
-                self.cmb_resume_projects.config(values=resumable)
-                self.cmb_resume_projects.current(0)
-                first_item = resumable[0]
-                pid = first_item.split(" ")[0]
-                self.current_project_id = pid
-                self.btn_resume.config(state="normal")
+                previous_id = select_project_id or self._resume_project_ids.get(self.cmb_resume_projects.get())
+                self._resume_project_ids = resumable
+                self.cmb_resume_projects.config(values=list(resumable))
+                selected = next((label for label, project_id in resumable.items() if project_id == previous_id), None)
+                if selected is None:
+                    selected = next(iter(resumable))
+                self.cmb_resume_projects.set(selected)
+                if not self.resume_banner.winfo_manager():
+                    self.resume_banner.pack(fill="x", pady=(8, 0))
+                project_id = resumable[selected]
+                self._show_persisted_project(self.persistence.load_project(project_id))
                 self.banner.show(
-                    f"Phát hiện dự án trước chưa hoàn thành: {pid}. Nhấn 'Tiếp tục' để tiếp tục.",
+                    f"Phát hiện dự án chưa hoàn thành: {project_id}. Chọn dự án và nhấn 'Tiếp tục dự án đã lưu'.",
                     level="info",
                 )
+            else:
+                self._resume_project_ids = {}
+                self.cmb_resume_projects.set("")
+                self.cmb_resume_projects.config(values=[])
+                self.resume_banner.pack_forget()
+                self.btn_resume.config(state="disabled")
         except Exception as e:
             logger.warning("Failed to check restart projects: %s", e)
 
     def _on_resume_detected_project(self) -> None:
-        sel = self.cmb_resume_projects.get()
-        if not sel:
+        if self.worker.is_running or self.discovery_worker.is_running:
             return
-        proj_id = sel.split(" ")[0]
+        proj_id = self._resume_project_ids.get(self.cmb_resume_projects.get())
+        if not proj_id:
+            return
         try:
             proj_data = self.persistence.load_project(proj_id)
-            self.current_project_id = proj_id
-            self.current_project_name = proj_data.get("project_name", proj_id)
+            self._show_persisted_project(proj_data)
 
             final_json = proj_data.get("final_json")
             if final_json:
@@ -882,6 +942,7 @@ class MainWindow(tk.Tk):
 
             self._set_running_state(True)
             self._log(f"Tiếp tục thực hiện dự án: '{proj_id}'...")
+            self.settings = self.settings_manager.load()
             self.worker.resume_project(
                 project_id=proj_id,
                 output_dir=self.settings.output_dir or None,

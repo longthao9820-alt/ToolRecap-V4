@@ -11,7 +11,7 @@ from toolrecap_v4.analysis.evidence_store import EvidenceStore
 from toolrecap_v4.analysis.models import PreparedEpisode, Transcript, TranscriptCue
 from toolrecap_v4.analysis.scanner import ScannerChunkPolicy, ScannerConfig, ScannerService, compute_evidence_revision
 from toolrecap_v4.cancellation import CancellationToken
-from toolrecap_v4.errors import CancelledError, ScannerRepairExhaustedError
+from toolrecap_v4.errors import CancelledError, EmptyApiResponseError, ScannerRepairExhaustedError, ScannerResponseError
 from toolrecap_v4.gateway import GatewayResult
 
 
@@ -171,6 +171,39 @@ def test_failed_chunk_resumes_without_resending_valid_chunks(tmp_path):
     assert [(item.evidence_id, item.observation) for item in resumed_items] == [
         (item.evidence_id, item.observation) for item in baseline_items
     ]
+
+
+def test_empty_completed_gateway_stream_is_retryable_transport_failure(tmp_path):
+    class EmptyOnceGateway(FakeGateway):
+        def __init__(self):
+            super().__init__()
+            self.attempts: list[tuple[str, str]] = []
+            self.failed = False
+
+        def submit_text_chat(self, **kwargs):
+            prompt = json.loads(kwargs["prompt"])
+            chunk_id = prompt["chunk_id"]
+            self.attempts.append((kwargs["phase"], chunk_id))
+            if chunk_id == "E01-CH-002" and not self.failed:
+                self.failed = True
+                raise EmptyApiResponseError("Gateway streaming response completed with empty content.", raw_response="")
+            return super().submit_text_chat(**kwargs)
+
+    gateway = EmptyOnceGateway()
+    service = ScannerService(
+        gateway, tmp_path,
+        _config(parallelism=1, chunk_policy=ScannerChunkPolicy(15_000, 5000)),
+    )
+    with pytest.raises(ScannerResponseError, match="Gateway failed"):
+        service.scan_project("project-1", [_episode()])
+    assert gateway.attempts == [("scanner", "E01-CH-001"), ("scanner", "E01-CH-002")]
+    assert not list((tmp_path / "projects" / "project-1" / "scanner").rglob("E01-CH-002/attempt-*.raw.txt"))
+
+    result = service.scan_project("project-1", [_episode()])
+    assert gateway.attempts[-1] == ("scanner", "E01-CH-002")
+    assert len(gateway.attempts) == 3
+    assert result.reused_chunk_count == 1 and result.requested_chunk_count == 1
+    assert result.total_evidence_count == 2
 
 
 def test_revision_invalidation_matrix():
