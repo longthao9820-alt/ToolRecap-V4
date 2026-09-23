@@ -998,7 +998,11 @@ class ProjectWorkflow:
                     raise phase7_err
                 planner_draft_hash = hashlib.sha256(json.dumps(planner_result.draft.to_dict(),ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest()
                 visual_result = visual_service.run(project_id=project_id,draft=planner_result.draft,planner_draft_hash=planner_draft_hash,episodes=prepared_models,evidence_revision=evidence_result.evidence_revision,cancellation_token=cancellation_token)
-                plan_service = self.season_plan_service or SeasonPlanService(self.gateway_client,self.persistence.root,cfg.planner_model,cfg.planner_reasoning)
+                plan_service = self.season_plan_service or SeasonPlanService(
+                    self.gateway_client, self.persistence.root, cfg.planner_model,
+                    cfg.planner_reasoning, repair_attempts=cfg.planner_repair_attempts,
+                    max_request_bytes=cfg.planner_max_request_bytes,
+                )
                 plan_result = plan_service.run(project_id=project_id,raw_recap_prompt=state.get("prompt",""),catalog=catalog_result.catalog,draft=planner_result.draft,visual=visual_result,cancellation_token=cancellation_token)
                 plan_summary={"status":"completed","plan_hash":plan_result.plan.plan_hash,"visual_revision":visual_result.visual_revision,"output_count":len(plan_result.plan.outputs),"season_plan_path":str(plan_result.path),"reused":plan_result.reused,"completed_at":datetime.now(timezone.utc).isoformat()}
                 self.persistence.save_checkpoint(project_id,"season_plan",plan_summary)

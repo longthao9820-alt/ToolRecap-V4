@@ -234,7 +234,10 @@ class VisualStoreError(VisualEvidenceError): pass
 
 
 class SeasonPlanError(ToolRecapError): pass
-class FinalPlannerValidationError(SeasonPlanError): pass
+class FinalPlannerValidationError(SeasonPlanError):
+    def __init__(self, message: str, *, issue_codes: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.issue_codes = issue_codes
 class SeasonPlanLockError(SeasonPlanError): pass
 
 
