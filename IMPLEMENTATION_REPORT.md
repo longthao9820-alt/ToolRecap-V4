@@ -1,18 +1,18 @@
-# ToolRecap V4 — Implementation & Verification Report (Phase 13 Portable Packaging)
+# ToolRecap V4 — Implementation & Verification Report (Phase 14 Synthetic Integration)
 
 **Date**: 2026-09-23
-**Contract**: Phase 13 — Portable Packaging + Self-Check + Safe Updater Acceptance
+**Contract**: Phase 14 — Full Regression + Synthetic End-to-End Integration Acceptance
 **Project**: ToolRecap V4  
 **Target Platform**: Windows 10/11 x64 Portable  
 **Version**: v4.0.0  
-**Phase**: Phase 13 — Portable Packaging, Runtime Resources, Self-Check and Updater
-**Status**: Phase 13 IMPLEMENTED with a real Windows one-folder build, relocated packaged smoke checks, and synthetic updater acceptance. Real episode/season E2E remains later scope.
+**Phase**: Phase 14 — Full Regression, Synthetic Episode/Season E2E, Restart and Failure Injection
+**Status**: Phase 14 IMPLEMENTED with deterministic synthetic episode/season acceptance. Real episode/season E2E remains later scope.
 
 ---
 
 ## 1. Executive Summary & Scope
 
-This report documents implementation and closure verification through **Phase 13 — Portable Packaging + Self-Check + Safe Updater Acceptance** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`). The workflow runs analysis → canonical Final JSON → downstream VoiceStudio/Audio Mix/render → publication through the Phase 12 resolver. `FINAL_JSON_READY` remains the zero-AI downstream boundary.
+This report documents implementation and verification through **Phase 14 — Full Regression + Synthetic End-to-End Integration Acceptance** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`). Synthetic source media now runs through the production workflow to published, FFprobe-validated video using deterministic fake AI and VoiceStudio responses. `FINAL_JSON_READY` remains the zero-AI downstream boundary.
 
 ### Cumulative Progression:
 - **Phase 1 (Baseline Validated)**: Established independent V4 workspace with 215/215 tests passing, schema 3.0 immutable, Windows DPAPI secret persistence preserved.
@@ -28,6 +28,17 @@ This report documents implementation and closure verification through **Phase 13
 - **Phase 11 (Downstream Integration)**: Connected generated Final JSON to the same imported-JSON VoiceStudio/Audio Mix/render path, added validated narration WAV caching, and verified zero-AI downstream retry/reuse boundaries.
 - **Phase 12 (Publication Resolver)**: Added one authoritative manual/automatic publication-root resolver, automatic sibling `Outputs_<working-folder-name>`, delayed root creation, internal-artifact isolation, destination-aware checkpoints and unowned-target collision protection.
 - **Phase 13 (Portable Packaging & Updater)**: Added centralized relocation-safe resource lookup, one-folder PyInstaller packaging with actual FFmpeg/OCR/STT runtime collection, structured zero-AI self-check, package content validation, safe updater staging/checksum/traversal/active-workflow guards, rollback validation, and real Windows portable smoke acceptance.
+- **Phase 14 (Synthetic Integration)**: Exercised real source preparation, Scanner/Evidence, Catalog, Planner/evidence fetch, selective Vision, locked Season Plan, independent Writers, targeted repair, canonical Final JSON, fake VoiceStudio narration cache, FFmpeg Audio Mix/render, and publication. Added disk-backed restart, semantic invalidation, zero-AI reuse, technical failure, and cross-project isolation tests. Fixed silent-audio loudnorm and owned-output retry defects found by those tests.
+
+### Exact Scope Executed in Phase 14
+
+1. FFmpeg-generated video/audio/subtitle fixtures drive one-episode and three-episode production workflows. The season includes a complete zero-Evidence episode, a secondary event, and an E01+E03 cross-episode output.
+2. A deterministic fake Gateway implements the actual Scanner, Planner, Evidence fetch, selective still-image Vision, final Planner, Writer and repair JSON contracts. Production parsers, validators, stores and orchestration remain active.
+3. The real renderer produces decodable videos with human titles; actual source files, LocalAppData artifacts, Final JSON, narration cache and publication remain separated.
+4. Restart tests recreate workflows from disk at PREPARED, EVIDENCE_READY, CATALOG_READY, PLANNER_DRAFT_READY, SEASON_PLAN_READY, WRITER_DRAFTS_READY and FINAL_JSON_READY without repeating valid prior AI calls.
+5. Invalidation tests cover sidecar content hashes, Scanner model/reasoning/parallelism, Vision model and frame reuse, Planner model, Voice, Audio Mix, render quality and publication destination.
+6. Failure tests cover repair exhaustion, zero-output truth, Voice/render retry, blocked publication root, unowned collision, source mutation, corrupt output and narration cache, cancellation after Final JSON, and partial multi-output resume.
+7. A silent but valid WAV exposed an FFmpeg loudness-pass failure; the renderer now uses `anull` for non-finite loudness measurements. A failed rerender exposed lost checkpoint ownership; the workflow now retains an already-owned destination path through failure, enabling a safe retry.
 
 ### Exact Scope Executed in Phase 13
 
@@ -248,6 +259,14 @@ All validation suites executed and passed cleanly:
 - Real Windows packaging acceptance passed after the closure fix: one-folder build at `dist/ToolRecapV4`, frozen self-check from the build folder, Unicode/space relocation, different-CWD execution, ZIP extraction validation, and package content audit. Frozen self-check returned **0 / WARN** in all three launch contexts; required schema, FFmpeg, FFprobe, OCR, STT, settings, output resolver, and updater checks were **PASS**. Warnings identified optional OCR/STT model absence and incomplete Gateway configuration. Distribution size: **644,958,617 bytes (615.08 MiB)** across 1,973 files; compressed ZIP: **255,557,490 bytes**. Release SHA-256: `fd765da8c1a72bde8d794c38ae6095990f44cdad2228e492840e50b8fb356d32`.
 - Package runtime includes Python 3.12, schema 3.0, FFmpeg/FFprobe, Pillow, ONNX Runtime/RapidOCR, faster-whisper/CTranslate2, tkinter, and updater code. User settings, DPAPI secrets, projects, models, output media, tests, pytest and Git metadata are absent. Managed state remains `%LOCALAPPDATA%\ToolRecapV4\`; the install directory is read-only runtime content for normal operation.
 - Updater acceptance uses semantic versions, published archive SHA-256, bounded safe extraction and package resource validation; it is checksum-based, without a release-signature claim. The Settings dialog now passes workflow activity to staging/apply guards. A separate helper waits for process exit, copies the frozen runtime outside the install directory, applies validated files, runs a startup handshake, and restores backed-up install files on failure. Synthetic valid/invalid cases and preservation of settings, DPAPI placeholder, project, Final JSON, narration, and publication markers passed.
+- Phase 14 final full suite: **618 passed in 114.52s**, 0 failures, 0 errors, 0 skipped, using a short Windows-safe pytest basetemp. Phase 14 focused integration: **24 passed**. The increase from Phase 13's 594 is exactly those 24 tests.
+- Phase 14 regression matrix: Phase 13 **22 passed**, updater **15**, Phase 12 **10**, Phase 11 **32**, Phase 10 **49**, Phase 9 **25**, Phase 8 **20**, Phase 7 **28**, Phase 6 **35**, Phase 5 **33**, Phase 4 **44**, Phase 3 **106**, Phase 2 Gateway **33**, VoiceStudio **9**, renderer **18**, media **25**, workflow **25**, UI **28**, schema **5**, secrets **5**, cancellation **5**.
+- Synthetic single episode: production source prep, Scanner, complete Catalog, two Planner rounds with exact Evidence fetch, selected still-image Vision, locked Plan, Writer, canonical Final JSON, fake WAV, real Audio Mix/FFmpeg renderer, and sibling publication completed. AI calls: Scanner 1, Planner 2, Vision 1, final refinement 1, Writer 1, repair 0.
+- Synthetic season: E01/E02/E03, with E02 complete and zero Evidence; three outputs include E01+E03 clips, a secondary event, and targeted repair of `out_002`. All three published MP4s were FFprobe-readable. AI calls: Scanner 3, Planner 2, Vision 1, final refinement 1, Writer 3, repair 1. No whole video/audio bytes went to the fake Gateway.
+- Disk-backed restarts from PREPARED, EVIDENCE_READY, CATALOG_READY, PLANNER_DRAFT_READY, SEASON_PLAN_READY, WRITER_DRAFTS_READY and FINAL_JSON_READY passed. Final JSON import and completed-Final-JSON retry used zero AI. Voice, mix, render and destination changes respected their cache/invalidation boundaries; changing AI settings after Final JSON did not restart analysis.
+- Technical acceptance covered repair exhaustion, zero-output plans, cancellation after Final JSON, corrupt output/WAV recovery, sidecar content mutation with unchanged mtime, Scanner model/reasoning/parallelism, Vision model with reusable frames, Planner model, source integrity, Voice/render failures, blocked publication root, unowned collision, partial multi-output resume, and cross-project isolation. Existing stage tests additionally cover raw-response crash recovery, malformed responses, capacity bounds, Gateway error classification, long-cue splitting, and asynchronous ordering.
+- A real silent-WAV render failure led to an `anull` fallback for non-finite loudness measurements. A failed rerender losing ownership of a prior valid file led to preserving an already-owned output path in rendering/failure checkpoints. Both defects have integration regressions.
+- Phase 14 production changes required rebuilding the Windows one-folder package. The rebuilt EXE passed clean-PATH, relocated Unicode/space, and different-CWD self-check acceptance. Package size: **644,959,153 bytes (615.08 MiB)**; release SHA-256: `16ed06aecc288797f29dce5764bc858633d37513a26ab2a375a4dbfd04d828b7`. Package audit found no tests, Git metadata or user state.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
   - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
@@ -303,9 +322,16 @@ All validation suites executed and passed cleanly:
 - `tests/test_visual_closure.py`: strict range and Vision identity/type rejection, deterministic request IDs, canonical source mapping, raw response recovery, factual prompt boundary and immutable Phase 4 Evidence.
 - `tests/test_season_plan_closure.py`: zero/one/many outputs, AI order preservation, application-owned IDs, identity mismatch rejection, pre-lock absence and semantic plan revision behavior.
 
+### Phase 14 integration modules
+
+- `tests/test_phase14_workflow_e2e.py`: FFmpeg-generated source variants, one-episode and three-episode workflows, exact protocol fake Gateway, selective Vision, targeted repair, Final JSON determinism, real render/FFprobe and publication inspection.
+- `tests/test_phase14_resume.py`: disk-backed checkpoint restarts, zero-Vision completion, downstream settings matrix, partial output resume, source mutation, cancellation, corrupt cache recovery, and cross-project isolation.
+- `tests/test_phase14_invalidation.py`: sidecar content hash, Scanner model/reasoning/parallelism, Vision model/frame reuse and Planner model invalidation.
+- `tests/test_phase14_failures.py`: imported Final JSON bypass, repair exhaustion, zero-output behavior, Voice/render retry, publication failure and unowned collision.
+
 ---
 
-## 4. Explicit Limitations & Boundaries (Phase 14+ Scope)
+## 4. Explicit Limitations & Boundaries (Phase 15+ Scope)
 
 - **General scene Vision boundary**: Selective Planner-requested still-image Vision is implemented in Phase 7. Full-episode/season scans, video upload and arbitrary sampling remain prohibited.
 - **Writer validation/repair and Final JSON**: IMPLEMENTED in Phase 9.
@@ -319,5 +345,5 @@ All validation suites executed and passed cleanly:
 - **Executable Packaging**: One-folder `dist/ToolRecapV4/ToolRecapV4.exe` and `release/ToolRecapV4-v4.0.0-windows-portable.zip` were built and verified. Generated artifacts remain ignored by Git.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.
 - **External services and hardware**: 9Router and VoiceStudio remain external and were not called by self-check. OCR/STT models remain managed downloads. NVIDIA hardware/driver is not bundled; CPU libx264 fallback was verified. Live release-server update, fresh target-machine/VM acceptance, real single-episode E2E, and real season E2E remain unverified.
-- **Git state**: Phase 1–12 history is preserved. Phase 13 implementation is `fdba22b36c75d7fd842c49aa341e119c2e4f1a5d` (`feat: harden portable packaging and updater`); closure fixes are `bdf8f09e2a08b3eb8ac3235601233f568a2617db` (`fix: close Phase 13 packaging gaps`) and `27a3f1221559007ad7e86e0b7e6657b899f382f1` (`fix: validate Python runtime in portable updates`). No remote or push is configured.
-- **Phase 14**: NOT started. No real episode E2E or real season E2E acceptance is claimed.
+- **Git state**: Phase 1–13 history is preserved through `c2016ed7120b2e739cd14cc6bcafb24f5aaeecaa` (`docs: finalize Phase 13 closure report`). Phase 14 implementation/fix is `11d5b798c74f93f93fc85d4b3415eb4553bb8f52` (`fix: close full workflow integration gaps`). No remote or push is configured.
+- **Phase 14**: Synthetic integration acceptance completed. The package was rebuilt after the renderer/workflow fixes. Real single-episode and real season E2E acceptance were not performed; Phases 15 and 16 have not started. No production-ready claim is made.

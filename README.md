@@ -1,13 +1,13 @@
-# Hướng dẫn sử dụng ToolRecap V4 (Phase 13 Portable Packaging)
+# Hướng dẫn sử dụng ToolRecap V4 (Phase 14 Synthetic Integration Acceptance)
 
 ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tóm tắt và dựng video recap từ video nguồn.
 
 ---
 
-## 1. Trạng thái hiện tại: Phase 13 Portable Packaging
+## 1. Trạng thái hiện tại: Phase 14 Synthetic Integration Acceptance
 
 > **LƯU Ý TRUNG THỰC VỀ TIẾN ĐỘ & BẢN DỰNG:**
-> Hiện tại dự án đã hoàn thành **Phase 13 (Portable Packaging + Self-Check + Safe Updater Acceptance)**. Phase 12 Publication Resolver remains part of the runtime:
+> Hiện tại dự án đã hoàn thành **Phase 14 (Full Regression + Synthetic End-to-End Integration Acceptance)**. Phase 13 portable packaging và Phase 12 Publication Resolver vẫn là thành phần runtime:
 > - **Hệ thống chuẩn bị nguồn cục bộ hoàn chỉnh**: Mô-đun `toolrecap_v4.analysis` xử lý trích xuất phụ đề, bóc tách âm thanh, nhận diện tiếng nói và lưu trữ tạo tác chuẩn bị có kiểm soát chất lượng.
 > - **Thứ tự ưu tiên trích xuất hội thoại nghiêm ngặt**:
 >   1. Phụ đề rời tiếng Anh (Sidecar text: SRT, VTT, ASS) với khả năng làm sạch thẻ định dạng.
@@ -95,7 +95,8 @@ ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tó
 >   - Khi các model cần thiết đã cấu hình: ... → independent Writers → targeted validation/repair → schema 3.0 Final JSON → `FINAL_JSON_READY` (ranh giới downstream zero-AI) → VoiceStudio/Audio Mix/render → publication qua Phase 12 Output Directory Resolver.
 >   - Fresh install chưa cấu hình Scanner model dừng rõ ràng ở `PREPARED`; ID model là free text, provider-neutral. Settings cũ được migrate nguyên literal từ `gateway_sub_model`.
 > - **Portable package đã được build và kiểm tra thực tế**: one-folder `dist/ToolRecapV4/ToolRecapV4.exe`, portable ZIP trong `release/`, self-check chạy với Python/source path bị loại khỏi PATH, sau relocation Unicode/space và từ CWD khác.
-> - **Phase 14+ chưa bắt đầu**: real single-episode/season E2E chưa được chấp nhận; Phase 14 full acceptance campaign chưa bắt đầu.
+> - **Nghiệm thu tổng hợp Phase 14**: synthetic single-episode và season ba tập đã đi qua source preparation, AI protocol giả lập, Final JSON, Voice WAV giả lập, FFmpeg render và publication. Restart/checkpoint, targeted repair, zero-AI reuse và failure injection đã được kiểm tra.
+> - **Phase 15/16 chưa bắt đầu**: chưa nghiệm thu tập phim thật hoặc season thật; chưa tuyên bố production-ready.
 > - **MỤC TIÊU CẬP NHẬT CHƯA XÁC MINH PHÁT HÀNH**: Cấu hình kho cập nhật đích `longthao9820-alt/ToolRecap-V4` là định danh cấu hình, chưa có bản release thực tế trên remote.
 
 ---
