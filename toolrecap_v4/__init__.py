@@ -115,6 +115,7 @@ from toolrecap_v4.persistence import (
     get_storage_root,
     read_json,
 )
+from toolrecap_v4.output_paths import OutputDirectoryError, derive_working_folder, ensure_publication_root, resolve_publication_root
 from toolrecap_v4.schemas.schema import get_project_schema, get_schema_validator
 from toolrecap_v4.secrets import (
     DPAPISecretStore,
@@ -203,6 +204,10 @@ __all__ = [
     "atomic_write_json",
     "get_storage_root",
     "read_json",
+    "OutputDirectoryError",
+    "derive_working_folder",
+    "ensure_publication_root",
+    "resolve_publication_root",
     "get_project_schema",
     "get_schema_validator",
     "validate_project",

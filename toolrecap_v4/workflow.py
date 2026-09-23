@@ -62,6 +62,7 @@ from toolrecap_v4.errors import (
 from toolrecap_v4.gateway import GatewayClient, GatewayResult
 from toolrecap_v4.media import probe_media
 from toolrecap_v4.persistence import ProjectPersistence, get_storage_root
+from toolrecap_v4.output_paths import derive_working_folder, ensure_publication_root, resolve_publication_root
 from toolrecap_v4.renderer import (
     RenderError,
     RenderResult,
@@ -415,15 +416,15 @@ class ProjectWorkflow:
         validate_windows_name(project_name, "project_name")
 
         cfg = settings or self.settings_manager.load()
+        working_folder = derive_working_folder(source_input)
         fps = resolve_sources(source_input, cancellation_token=cancellation_token)
         if not fps:
             raise DiscoveryError("No supported source files discovered.")
 
-        if output_dir is not None:
-            resolved_output_dir = Path(output_dir).resolve()
-        else:
-            resolved_output_dir = self.persistence.root / "outputs" / project_id
-        resolved_output_dir.mkdir(parents=True, exist_ok=True)
+        manual_output_dir = str(output_dir or cfg.output_dir or "").strip()
+        resolved_output_dir = resolve_publication_root(
+            manual_output_dir=manual_output_dir, working_folder=working_folder,
+        )
 
         source_fps_map = {fp.basename: fp.to_dict() for fp in fps}
         effective_prompt = prompt or cfg.prompt
@@ -439,6 +440,8 @@ class ProjectWorkflow:
             "project_name": project_name,
             "status": ProjectStatus.CREATED.value,
             "output_dir": str(resolved_output_dir),
+            "manual_output_dir": manual_output_dir,
+            "working_folder": str(working_folder),
             "sources": [
                 {
                     "source_file": fp.basename,
@@ -486,15 +489,15 @@ class ProjectWorkflow:
         validate_windows_name(project_name, "project_name")
 
         cfg = settings or self.settings_manager.load()
+        working_folder = derive_working_folder(source_input)
         fps = resolve_sources(source_input, cancellation_token=cancellation_token)
         if not fps:
             raise DiscoveryError("No supported source files discovered.")
 
-        if output_dir is not None:
-            resolved_output_dir = Path(output_dir).resolve()
-        else:
-            resolved_output_dir = self.persistence.root / "outputs" / project_id
-        resolved_output_dir.mkdir(parents=True, exist_ok=True)
+        manual_output_dir = str(output_dir or cfg.output_dir or "").strip()
+        resolved_output_dir = resolve_publication_root(
+            manual_output_dir=manual_output_dir, working_folder=working_folder,
+        )
 
         source_fps_map = {fp.basename: fp.to_dict() for fp in fps}
 
@@ -524,6 +527,8 @@ class ProjectWorkflow:
             "project_name": project_name,
             "status": ProjectStatus.ANALYZED.value,
             "output_dir": str(resolved_output_dir),
+            "manual_output_dir": manual_output_dir,
+            "working_folder": str(working_folder),
             "sources": [
                 {
                     "source_file": fp.basename,
@@ -1038,12 +1043,22 @@ class ProjectWorkflow:
                 json.dumps(final_json, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest()
             if output_dir is not None:
-                resolved_output_dir = Path(output_dir).resolve()
-                resolved_output_dir.mkdir(parents=True, exist_ok=True)
-                state["output_dir"] = str(resolved_output_dir)
+                manual_output_dir = str(output_dir).strip()
+            elif settings is not None:
+                manual_output_dir = str(settings.output_dir or "").strip()
             else:
-                resolved_output_dir = Path(state.get("output_dir", self.persistence.root / "outputs" / project_id)).resolve()
-                resolved_output_dir.mkdir(parents=True, exist_ok=True)
+                manual_output_dir = str(state.get("manual_output_dir", "")).strip()
+            working_folder = state.get("working_folder")
+            if not working_folder:
+                working_folder = derive_working_folder(
+                    [fp["path"] for fp in state["source_fingerprints"].values()]
+                )
+            resolved_output_dir = ensure_publication_root(resolve_publication_root(
+                manual_output_dir=manual_output_dir, working_folder=working_folder,
+            ))
+            state["output_dir"] = str(resolved_output_dir)
+            state["manual_output_dir"] = manual_output_dir
+            state["working_folder"] = str(working_folder)
 
             # Step 4: Check publication collision against ALL project sources (including unused)
             all_source_paths = [fp["path"] for fp in state["source_fingerprints"].values()]
@@ -1086,6 +1101,22 @@ class ProjectWorkflow:
                 except Exception:
                     ckpt = outputs_state.get(render_id)
 
+                intended_video = (resolved_output_dir / f"{title}.mp4").resolve()
+                checkpoint_owns_destination = bool(
+                    ckpt and ckpt.get("output_path")
+                    and Path(ckpt["output_path"]).resolve() == intended_video
+                )
+                if not checkpoint_owns_destination:
+                    unowned = next((path for path in (
+                        resolved_output_dir / f"{title}.mp4",
+                        resolved_output_dir / f"{title}.narration.srt",
+                        resolved_output_dir / f"{title}.original.srt",
+                    ) if path.exists()), None)
+                    if unowned is not None:
+                        raise SourceCollisionError(
+                            f"Publication target '{unowned}' already exists without a matching project checkpoint."
+                        )
+
                 # Validate completed output presence and hash before skip
                 should_skip = False
                 if ckpt and ckpt.get("status") in (OutputStatus.COMPLETED.value, OutputStatus.SKIPPED.value):
@@ -1095,7 +1126,8 @@ class ProjectWorkflow:
 
                     if ckpt_fp == cur_fp and out_path_str and expected_hash:
                         out_path = Path(out_path_str)
-                        if out_path.is_file():
+                        expected_path = (resolved_output_dir / f"{title}.mp4").resolve()
+                        if out_path.resolve() == expected_path and out_path.is_file():
                             actual_hash = compute_file_sha256(out_path)
                             if actual_hash == expected_hash:
                                 should_skip = True

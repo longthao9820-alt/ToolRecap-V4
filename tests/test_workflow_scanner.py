@@ -149,8 +149,8 @@ def test_workflow_reaches_catalog_ready_and_stops_before_phase6(tmp_path, monkey
         render_calls["count"]+=1
         if render_calls["count"]==1:
             raise RuntimeError("simulated downstream render failure")
-        out=tmp_path/"out"/"Generated_Output.mp4";out.parent.mkdir(parents=True,exist_ok=True);out.write_bytes(b"rendered")
-        return SimpleNamespace(output_path=out,narration_srt_path=tmp_path/"out"/"Generated_Output.narration.srt",original_srt_path=tmp_path/"out"/"Generated_Output.original.srt",duration=2.0,video_codec="h264",audio_codec="aac",width=640,height=480,fps=25.0)
+        destination=Path(kwargs["output_dir"]);out=destination/"Generated_Output.mp4";out.parent.mkdir(parents=True,exist_ok=True);out.write_bytes(b"rendered")
+        return SimpleNamespace(output_path=out,narration_srt_path=destination/"Generated_Output.narration.srt",original_srt_path=destination/"Generated_Output.original.srt",duration=2.0,video_codec="h264",audio_codec="aac",width=640,height=480,fps=25.0)
     monkeypatch.setattr("toolrecap_v4.workflow.render_output",fake_render)
     gateway_calls=len(gateway.calls)
     with pytest.raises(RuntimeError,match="simulated downstream render failure"):
@@ -161,3 +161,8 @@ def test_workflow_reaches_catalog_ready_and_stops_before_phase6(tmp_path, monkey
     assert retried["status"]==ProjectStatus.COMPLETED.value and voice.calls==1 and len(gateway.calls)==gateway_calls
     skipped=workflow.retry_project("project-1")
     assert skipped["status"]==ProjectStatus.COMPLETED.value and render_calls["count"]==2 and voice.calls==1
+    manual_destination=tmp_path/"manual-publication"
+    moved=workflow.retry_project("project-1",settings=AppSettings(output_dir=str(manual_destination)))
+    assert moved["status"]==ProjectStatus.COMPLETED.value and render_calls["count"]==3 and voice.calls==1
+    assert Path(moved["output_dir"])==manual_destination and (manual_destination/"Generated_Output.mp4").is_file()
+    assert len(gateway.calls)==gateway_calls

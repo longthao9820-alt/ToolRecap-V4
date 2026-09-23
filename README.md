@@ -1,13 +1,13 @@
-# Hướng dẫn sử dụng ToolRecap V4 (Phase 11 Final JSON → Voice & Render)
+# Hướng dẫn sử dụng ToolRecap V4 (Phase 12 Publication Output Resolver)
 
 ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tóm tắt và dựng video recap từ video nguồn.
 
 ---
 
-## 1. Trạng thái hiện tại: Phase 11 Downstream Voice/Audio Mix/Render
+## 1. Trạng thái hiện tại: Phase 12 Publication Output Resolver
 
 > **LƯU Ý TRUNG THỰC VỀ TIẾN ĐỘ & BẢN DỰNG:**
-> Hiện tại dự án đã hoàn thành **Phase 11 (Canonical Final JSON Downstream Integration)**:
+> Hiện tại dự án đã hoàn thành **Phase 12 (Central Publication Output Resolver)**:
 > - **Hệ thống chuẩn bị nguồn cục bộ hoàn chỉnh**: Mô-đun `toolrecap_v4.analysis` xử lý trích xuất phụ đề, bóc tách âm thanh, nhận diện tiếng nói và lưu trữ tạo tác chuẩn bị có kiểm soát chất lượng.
 > - **Thứ tự ưu tiên trích xuất hội thoại nghiêm ngặt**:
 >   1. Phụ đề rời tiếng Anh (Sidecar text: SRT, VTT, ASS) với khả năng làm sạch thẻ định dạng.
@@ -84,11 +84,17 @@ ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tó
 >   - Narration WAV được validate và cache theo Final JSON narration + voice configuration; mix/render changes không gọi lại VoiceStudio.
 >   - Existing deterministic Audio Mix, loudness normalization, source-audio/ducking, multi-source renderer và GPU/encoder detection được giữ nguyên.
 >   - Render/output checkpoints retain fingerprint + file hash validation; retry/restart từ valid Final JSON là zero-AI.
+> - **Publication Output Resolver**:
+>   - Manual output directory thắng chính xác; để trống dùng thư mục sibling `Outputs_<tên working folder>`.
+>   - Folder input dùng folder được chọn; single-file input dùng parent folder. Tên có khoảng trắng/Unicode được giữ nguyên.
+>   - Auto path không được ghi trở lại manual setting và chỉ được tạo ở publication boundary.
+>   - Generated/imported Final JSON dùng cùng resolver; thay destination không chạy lại AI hoặc VoiceStudio nếu narration cache còn hợp lệ.
+>   - Publication folder chỉ chứa video/SRT user-facing; Final JSON, Evidence, Vision, Writer, repair, narration cache và temp render vẫn ở managed storage.
 > - **Workflow kiểm soát chặt chẽ**:
 >   - Khi dự án đã có Final JSON hợp lệ hoặc được import từ trước: chạy thẳng vào luồng dựng (render), thực hiện chính xác 0 lượt gọi Gateway và 0 lượt chạy chuẩn bị nguồn.
 >   - Khi các model cần thiết đã cấu hình: ... → independent Writers → targeted validation/repair → schema 3.0 Final JSON → `FINAL_JSON_READY`, sau đó dừng trước Phase 10/11.
 >   - Fresh install chưa cấu hình Scanner model dừng rõ ràng ở `PREPARED`; ID model là free text, provider-neutral. Settings cũ được migrate nguyên literal từ `gateway_sub_model`.
-> - **CHƯA CÓ CÁC TÍNH NĂNG PHASE 12+**: Output Directory Resolver, portable packaging/updater acceptance và real episode/season E2E CHƯA được triển khai.
+> - **CHƯA CÓ CÁC TÍNH NĂNG PHASE 13+**: portable packaging/updater acceptance và real episode/season E2E CHƯA được triển khai.
 > - **CHƯA CÓ BẢN DỰNG EXE**: Chưa chạy đóng gói `build_portable.py` / PyInstaller; chưa có tệp `ToolRecapV4.exe` trong `dist/` hoặc bản nén trong `release/`.
 > - **MỤC TIÊU CẬP NHẬT CHƯA XÁC MINH PHÁT HÀNH**: Cấu hình kho cập nhật đích `longthao9820-alt/ToolRecap-V4` là định danh cấu hình, chưa có bản release thực tế trên remote.
 

@@ -1099,6 +1099,12 @@ class SettingsDialog(tk.Toplevel):
         ttk.Entry(p, textvariable=self.var_out_dir).grid(row=row, column=1, sticky="ew", padx=(10, 6), pady=5)
         ttk.Button(p, text="Duyệt...", command=self._browse_output_dir).grid(row=row, column=2, sticky="w", pady=5)
         row += 1
+        ttk.Label(
+            p,
+            text="Để trống = tự động tạo thư mục cùng cấp: Outputs_<tên thư mục nguồn>",
+            foreground="#6b7280",
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 5))
+        row += 1
 
         # GPU Acceleration
         ttk.Checkbutton(

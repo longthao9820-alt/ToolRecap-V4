@@ -1,12 +1,12 @@
-# ToolRecap V4 — Implementation & Verification Report (Phase 11 Downstream Voice & Render)
+# ToolRecap V4 — Implementation & Verification Report (Phase 12 Publication Output Resolver)
 
 **Date**: 2026-09-22  
-**Contract**: Phase 11 — Connect Final JSON to VoiceStudio, Audio Mix & GPU Render
+**Contract**: Phase 12 — Central Output Directory Resolver + Publication Boundary
 **Project**: ToolRecap V4  
 **Target Platform**: Windows 10/11 x64 Portable  
 **Version**: v4.0.0  
-**Phase**: Phase 11 — Canonical Final JSON Downstream Execution & Zero-AI Retry
-**Status**: Phase 11 IMPLEMENTED with mocked/synthetic verification; real episode/season acceptance remains later.
+**Phase**: Phase 12 — Publication Destination Resolution and Isolation
+**Status**: Phase 12 IMPLEMENTED with deterministic synthetic verification; packaging and real episode/season acceptance remain later.
 
 ---
 
@@ -26,6 +26,19 @@ This report documents the implementation and closure verification of **Phase 11*
 - **Phase 9 (Validation/Repair/Merge)**: Added deterministic per-output issue codes, invalid-only bounded repair, repair recovery/provenance, immutable validated outputs, application-owned schema 3.0 mapping, canonical validation, atomic Final JSON checkpoint/reuse and `FINAL_JSON_READY` workflow integration.
 - **Phase 10 (Gateway Settings)**: Added provider-neutral Scanner/Vision/Finalizer controls, secure transactional API-key save, legacy stage-preserving migration, unified explicit Finalizer mapping, unsaved-value background diagnostics and settings dependency wiring.
 - **Phase 11 (Downstream Integration)**: Connected generated Final JSON to the same imported-JSON VoiceStudio/Audio Mix/render path, added validated narration WAV caching, and verified zero-AI downstream retry/reuse boundaries.
+- **Phase 12 (Publication Resolver)**: Added one authoritative manual/automatic publication-root resolver, automatic sibling `Outputs_<working-folder-name>`, delayed root creation, internal-artifact isolation, destination-aware checkpoints and unowned-target collision protection.
+
+### Exact Scope Executed in Phase 12
+
+1. Manual publication root wins exactly; blank means automatic sibling output based on selected working folder.
+2. Folder input uses the selected folder; single-file and same-folder file lists use their parent. Multiple source parents require manual output.
+3. Root/nameless automatic paths, relative manual paths, path-as-file, unavailable shares/drives and mkdir failures raise `OutputDirectoryError` without fallback.
+4. Generated/imported Final JSON use the same downstream resolver; automatic paths are never persisted into the manual setting.
+5. Destination is created only at publication/downstream entry, not while Settings/source browsing/analysis runs.
+6. Managed Final JSON, narration cache and all analysis artifacts remain outside publication root; renderer temp work remains under managed render-work.
+7. Existing title naming, filename validation, source collision, fingerprint and output SHA checks remain. Unowned existing publication files are rejected rather than overwritten.
+8. Output-directory changes keep Final JSON/AI/narration valid; the current renderer rerenders at the new destination using cached narration.
+9. No packaging/updater acceptance or real production E2E work is included.
 
 ### Exact Scope Executed in Phase 11
 
@@ -37,7 +50,7 @@ This report documents the implementation and closure verification of **Phase 11*
 6. Output fingerprinting excludes AI settings but includes voice, mix, renderer, source and canonical output content dependencies.
 7. Existing output checkpoint reuse still requires matching fingerprint, file presence and output SHA; file existence alone is insufficient.
 8. Voice/render failures preserve canonical Final JSON and completed sibling outputs; retry performs zero AI and reuses valid narration artifacts.
-9. No Output Directory Resolver, packaging, or real live episode/season E2E work is included.
+9. Phase 10 did not add an Output Directory Resolver; Phase 12 now implements it. Packaging and real live episode/season E2E remain excluded.
 
 ### Exact Scope Executed in Phase 10
 
@@ -60,7 +73,7 @@ This report documents the implementation and closure verification of **Phase 11*
 6. Local deterministic mapper converts ordered valid outputs to immutable schema 3.0 without AI merge or editorial rewrite.
 7. Canonical validator runs before atomic COMPLETE Final JSON publication; corrupt/mismatched artifacts are not cache hits.
 8. Zero-output plans stop truthfully without fabricated content; one-shot routing foundation is capacity-explicit and seasons remain staged.
-9. At the Phase 9 boundary workflow reached `FINAL_JSON_READY`; Phase 11 now connects that checkpoint to the preserved VoiceStudio/Audio Mix/render stack. UI redesign and Output Directory Resolver remain separate phases.
+9. At the Phase 9 boundary workflow reached `FINAL_JSON_READY`; Phase 11 connected that checkpoint to VoiceStudio/Audio Mix/render, and Phase 12 now centralizes its publication destination.
 
 ### Exact Scope Executed in Phase 8
 
@@ -190,7 +203,7 @@ All validation suites executed and passed cleanly:
   - Result: 100% clean compilation across all modules and tests, 0 syntax or compilation errors.
 - **Module Import Verification**:
   - Command: `pkgutil.walk_packages` across `toolrecap_v4`
-  - Result: All 74 current submodules cleanly imported without error after Phase 11.
+  - Result: All 75 current submodules cleanly imported without error after Phase 12.
 - **Full Pytest Suite**:
   - Command: `pytest --basetemp="C:\Users\Long\AppData\Local\Temp\kilo\pytest_v4_phase3_run"`
    - Phase 2 baseline: **237 passed**.
@@ -212,6 +225,8 @@ All validation suites executed and passed cleanly:
 - Phase 10 settings/UI focused suite: **48 passed**, including secure migration, transactional rollback, diagnostics, dependency boundaries and real-Tk interaction tests.
 - Phase 11 closure full suite: **560 passed in 59.23s**, 0 failures, 0 errors, 0 skipped.
 - Phase 11 downstream-focused suite: **86 passed**, including 10 narration-cache/integration tests plus VoiceStudio, renderer, media and workflow regressions.
+- Phase 12 full suite: **569 passed in 62.91s**, 0 failures, 0 errors, 0 skipped.
+- Phase 12 resolver-focused suite: **9 passed**, plus generated/imported workflow and Phase 11 downstream regression coverage.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
   - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
@@ -269,13 +284,14 @@ All validation suites executed and passed cleanly:
 
 ---
 
-## 4. Explicit Limitations & Boundaries (Phase 12+ Scope)
+## 4. Explicit Limitations & Boundaries (Phase 13+ Scope)
 
 - **General scene Vision boundary**: Selective Planner-requested still-image Vision is implemented in Phase 7. Full-episode/season scans, video upload and arbitrary sampling remain prohibited.
 - **Writer validation/repair and Final JSON**: IMPLEMENTED in Phase 9.
 - **AI Gateway settings UI and secure migration**: IMPLEMENTED in Phase 10.
 - **Voice/Audio Mix/render verification**: IMPLEMENTED in Phase 11 using deterministic mocks/synthetic media; no real production episode/season acceptance is claimed.
-- **Output Directory Resolver**: NOT implemented; remains Phase 12.
+- **Output Directory Resolver**: IMPLEMENTED in Phase 12.
+- **Packaging/updater acceptance and real episode/season E2E**: NOT implemented; remain later scope.
 - **Output Writers**: IMPLEMENTED in Phase 8 as independent response-capture jobs.
 - **Executable Packaging**: Portable binary packaging via `build_portable.py` / PyInstaller was not run; no `dist/ToolRecapV4.exe` exists in this phase.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.
