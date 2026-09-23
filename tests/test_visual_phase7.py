@@ -25,7 +25,7 @@ class Gateway:
     def __init__(self):self.images=[];self.text=[]
     def submit_image_chat(self,**kw):
         self.images.append(kw); prompt=json.loads(kw["prompt"]); frames=prompt["frames"]
-        raw={"protocol_version":"visual-evidence-v1","visual_request_id":prompt["visual_request"]["visual_request_id"],"frames":[{"frame_id":f["frame_id"],"timestamp_ms":f["timestamp_ms"],"observations":["A person enters."]} for f in frames],"range_observation":"A person enters the room.","entities":[],"objects":["door"],"on_screen_text":[],"uncertainty":["Identity is not grounded"]}
+        raw={"protocol_version":"visual-evidence-v1","visual_request_id":prompt["visual_request"]["visual_request_id"],"episode_id":prompt["visual_request"]["episode_id"],"source_id":prompt["visual_request"]["source_id"],"frames":[{"frame_id":f["frame_id"],"timestamp_ms":f["timestamp_ms"],"observations":["A person enters."]} for f in frames],"range_observation":"A person enters the room.","entities":[],"objects":["door"],"on_screen_text":[],"uncertainty":["Identity is not grounded"]}
         return GatewayResult(raw_response=json.dumps(raw),bytes_sent=100,metadata={"status_code":200})
     def submit_text_chat(self,**kw):
         self.text.append(kw);p=json.loads(kw["prompt"]); vis=p["visual_evidence"]

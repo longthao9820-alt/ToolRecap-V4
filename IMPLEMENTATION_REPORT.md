@@ -12,7 +12,7 @@
 
 ## 1. Executive Summary & Scope
 
-This report documents the implementation and verification of **Phase 6** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`), adding the first editorial AI stage over the complete Phase 5 Catalog.
+This report documents the implementation and closure verification of **Phase 7** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`), adding selective Planner-requested scene Vision and the immutable Season Plan lock.
 
 ### Cumulative Progression:
 - **Phase 1 (Baseline Validated)**: Established independent V4 workspace with 215/215 tests passing, schema 3.0 immutable, Windows DPAPI secret persistence preserved.
@@ -33,6 +33,17 @@ This report documents the implementation and verification of **Phase 6** of the 
 6. Atomic Planner session, raw response, round, evidence-fetch and draft checkpoints with restart reuse and raw-response crash recovery.
 7. Workflow advances from `CATALOG_READY` through Planner rounds to `PLANNER_DRAFT_READY`, then stops before Phase 7.
 8. Explicit exclusions: no frame extraction, general image Gateway, visual Evidence, locked `season_plan.json`, canonical `out_###` IDs, Output Writer, Final JSON, voice or render.
+
+### Exact Scope Executed in Phase 7
+
+1. Validated Planner-requested visual ranges with deterministic `VR-E##-###` identities and canonical source derivation.
+2. Bounded local FFmpeg still extraction, deterministic temporal coverage, safe JPEG normalization, independent frame-cache keys and explicit hard-cap failures.
+3. Factual still-image Vision over selected frames only, strict request/frame/timestamp/episode/source validation, identity-grounding instructions and preserved uncertainty.
+4. Separate deterministic `E##-VIS-###` Visual Evidence layer; immutable Phase 4 textual Evidence remains unchanged.
+5. Hash-verified visual revisions, bounded raw response recovery metadata, request-state completeness ledger, zero-visual completion and resume without repeated valid Vision calls.
+6. Final Planner refinement with verbatim raw prompt, complete Catalog, Planner Draft, authoritative Full Evidence, complete Visual Evidence and visual completeness.
+7. Strict final references/ranges, AI-owned order/count, application-owned sequential `out_###`, deterministic plan hash/revision and atomic immutable `season_plan.json` lock.
+8. Workflow reaches `SEASON_PLAN_READY` and stops before Phase 8; no Writer, narration, Final JSON, voice, or render work is implemented.
 
 ### Exact Scope Executed in Phase 5
 
@@ -103,7 +114,7 @@ This report documents the implementation and verification of **Phase 6** of the 
 | **Memory Boundedness** | `ENFORCED` | Audio energy reads 4096-frame chunks; no full WAV in memory. Image OCR operates on bounded subtitle crops, never full video frames. |
 | **Stream Indexing Integrity** | `ENFORCED` | `AudioSelection` maintains separate `global_index` and `audio_ordinal`. Error raised if map spec requested on missing audio. |
 | **Editorial Independence** | `CLEAN` | No editorial policy classes, cue-capping heuristics, or arbitrary time clamping injected into analysis/preparation. |
-| **Controlled Workflow Boundary**| `VERIFIED` | Fully configured analysis reaches `ProjectStatus.PLANNER_DRAFT_READY` and stops before Phase 7; missing Planner configuration stops explicitly at `CATALOG_READY`. |
+| **Controlled Workflow Boundary**| `VERIFIED` | Fully configured analysis reaches `ProjectStatus.SEASON_PLAN_READY` and stops before Phase 8; missing Vision configuration with required ranges stops at `PLANNER_DRAFT_READY`. |
 | **Scanner Editorial Isolation** | `VERIFIED` | Scanner receives no Recap Prompt, application ranking policy, candidate logic, output quota, video, whole audio, or arbitrary local path. |
 | **Stable Evidence Identity** | `VERIFIED` | IDs are application-owned, deterministic after sorted validated chunk artifacts, and scoped by project + evidence revision. |
 | **Full Evidence Retention** | `VERIFIED` | Range queries return every overlap in deterministic order; no top-K, fuzzy dedupe, story ranking, or character/subplot filtering. |
@@ -141,8 +152,8 @@ All validation suites executed and passed cleanly:
 - Phase 5 focused coverage: **33 Catalog/packing/store tests** plus updated workflow bypass and `CATALOG_READY` integration assertions.
 - Phase 6 final full suite: **453 passed in 51.05s**, 0 failures, 0 errors, 0 skipped.
 - Phase 6 focused coverage: **35 Planner protocol/fetch/service tests**, two Planner settings tests, and updated workflow boundary/bypass assertions.
-- Phase 7 final full suite: **457 passed in 52.03s**, 0 failures, 0 errors, 0 skipped.
-- Phase 7 focused coverage: **4 selective visual/frame/plan-lock integration tests** plus updated workflow assertions.
+- Phase 7 closure full suite: **481 passed in 53.68s**, 0 failures, 0 errors, 0 skipped.
+- Phase 7 focused coverage: **28 targeted visual request/frame/Vision/cache/plan-lock tests** plus updated workflow assertions.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
   - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
@@ -192,13 +203,19 @@ All validation suites executed and passed cleanly:
 - `tests/test_workflow_scanner.py`: `PLANNER_DRAFT_READY` boundary and raw prompt handoff.
 - `tests/test_workflow_source_prep.py`: imported Final JSON bypass explicitly asserts Planner is never invoked.
 
+### Phase 7 test modules
+
+- `tests/test_visual_phase7.py`: selective extraction, factual ambiguity, safe Vision path, zero-visual behavior, stable Visual Evidence/output IDs and locked-plan reuse.
+- `tests/test_visual_closure.py`: strict range and Vision identity/type rejection, deterministic request IDs, canonical source mapping, raw response recovery, factual prompt boundary and immutable Phase 4 Evidence.
+- `tests/test_season_plan_closure.py`: zero/one/many outputs, AI order preservation, application-owned IDs, identity mismatch rejection, pre-lock absence and semantic plan revision behavior.
+
 ---
 
 ## 4. Explicit Limitations & Boundaries (Phase 8+ Scope)
 
-- **General scene Vision**: NOT implemented. Phase 4 is transcript/factual-text only; Phase 3 bitmap subtitle Vision OCR remains crop-restricted.
+- **General scene Vision boundary**: Selective Planner-requested still-image Vision is implemented in Phase 7. Full-episode/season scans, video upload and arbitrary sampling remain prohibited.
 - **Output Writers and Final JSON**: NOT implemented. Workflow stops at `ProjectStatus.SEASON_PLAN_READY` before Phase 8; no narration, Writer output, schema 3.0 Final JSON, voice or render is produced from the plan.
 - **Output Writers & Output Directory Resolver**: NOT implemented. Final JSON generation currently only accepts imported/pre-existing schemas.
 - **Executable Packaging**: Portable binary packaging via `build_portable.py` / PyInstaller was not run; no `dist/ToolRecapV4.exe` exists in this phase.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.
-- **No Git Mutations**: Working tree preserved; no branches, commits, or pushes created.
+- **Git state**: Phase 7 implementation commit `b4eb214` is preserved; closure corrections are committed separately. No remote or push is configured.
