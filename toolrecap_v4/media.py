@@ -15,6 +15,7 @@ from typing import Any, Sequence
 
 from toolrecap_v4.cancellation import CancellationToken
 from toolrecap_v4.errors import CancelledError, ToolRecapError
+from toolrecap_v4.runtime import application_root, bundled_runtime_root
 
 
 class MediaError(ToolRecapError):
@@ -168,18 +169,10 @@ def find_binary(
             if ep.is_file():
                 return ep.resolve()
 
-    # Bundled runtime check relative to project or executable
-    base_dirs = [
-        Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None,
-        Path(sys.executable).resolve().parent / "_internal" if getattr(sys, "frozen", False) else None,
-        Path(sys._MEIPASS).resolve() if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS") else None,
-        Path(__file__).resolve().parent.parent,
-        Path.cwd(),
-    ]
+    # Bundled runtime lookup is relocation-safe and never trusts process CWD.
+    base_dirs = [application_root(), bundled_runtime_root()]
     suffix = ".exe" if sys.platform == "win32" else ""
     for base in base_dirs:
-        if base is None:
-            continue
         candidates = [
             base / f"{name}{suffix}",
             base / "bin" / f"{name}{suffix}",

@@ -13,6 +13,11 @@ from typing import List, Optional
 
 from toolrecap_v4.errors import UpdateApplyError
 from toolrecap_v4.persistence import get_storage_root
+from toolrecap_v4.updater.validator import validate_package
+
+
+def _paths_overlap(first: Path, second: Path) -> bool:
+    return first == second or first in second.parents or second in first.parents
 
 
 def is_process_running(pid: int) -> bool:
@@ -95,6 +100,13 @@ def apply_staged_update_with_rollback(
         raise UpdateApplyError(f"Target directory does not exist: {target_dir}")
     if not staged_dir.is_dir():
         raise UpdateApplyError(f"Staged directory does not exist: {staged_dir}")
+    if _paths_overlap(target_dir, staged_dir) or _paths_overlap(target_dir, backup_dir) or _paths_overlap(staged_dir, backup_dir):
+        raise UpdateApplyError("Target, staged, and backup directories must be separate")
+
+    try:
+        validate_package(staged_dir)
+    except Exception as exc:
+        raise UpdateApplyError(f"Staged package validation failed: {exc}") from exc
 
     # Invariant: Never touch LOCALAPPDATA or user output directories
     roots_to_check = {get_storage_root().resolve()}
@@ -102,13 +114,13 @@ def apply_staged_update_with_rollback(
         roots_to_check.add(Path(storage_root).resolve())
 
     for s_root in roots_to_check:
-        if target_dir == s_root or s_root in target_dir.parents:
+        if _paths_overlap(target_dir, s_root):
             raise UpdateApplyError("Target directory must not be in LOCALAPPDATA storage root")
 
     if output_dirs:
         for out_dir in output_dirs:
             out_resolved = Path(out_dir).resolve()
-            if target_dir == out_resolved or out_resolved in target_dir.parents:
+            if _paths_overlap(target_dir, out_resolved):
                 raise UpdateApplyError("Target directory must not be in output publication directory")
 
     # 1. Finite wait for parent app exit
@@ -127,6 +139,7 @@ def apply_staged_update_with_rollback(
     relative_files = [p.relative_to(staged_dir) for p in staged_files]
 
     # 3. Backup ONLY package files that will be replaced
+    shutil.rmtree(backup_dir, ignore_errors=True)
     backup_dir.mkdir(parents=True, exist_ok=True)
     backed_up_rel_paths: set[Path] = set()
 
@@ -173,6 +186,7 @@ def apply_staged_update_with_rollback(
 
         # Handshake succeeded! Clean up backup
         shutil.rmtree(backup_dir, ignore_errors=True)
+        shutil.rmtree(staged_dir, ignore_errors=True)
         return True
 
     except Exception as e:
@@ -189,6 +203,7 @@ def apply_staged_update_with_rollback(
                     target_file.unlink(missing_ok=True)
 
         shutil.rmtree(backup_dir, ignore_errors=True)
+        shutil.rmtree(staged_dir, ignore_errors=True)
         if isinstance(e, UpdateApplyError):
             raise
         raise UpdateApplyError(f"Update application failed and was rolled back: {e}") from e

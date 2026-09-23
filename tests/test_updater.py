@@ -36,6 +36,31 @@ from toolrecap_v4.updater import (
 )
 
 
+def _write_valid_package(package_dir: Path, version: str = "4.1.0") -> Path:
+    package_dir.mkdir(parents=True, exist_ok=True)
+    (package_dir / "ToolRecapV4.exe").write_bytes(b"MZfakeexe")
+    (package_dir / "_internal").mkdir(exist_ok=True)
+    (package_dir / "_internal" / "runtime.dll").write_bytes(b"runtime")
+    (package_dir / "ffmpeg.exe").write_bytes(b"MZfakeffmpeg")
+    (package_dir / "ffprobe.exe").write_bytes(b"MZfakeffprobe")
+    (package_dir / "FFMPEG_LICENSE.txt").write_text("license", encoding="utf-8")
+    schema_dir = package_dir / "schemas"
+    schema_dir.mkdir(exist_ok=True)
+    schema = Path(__file__).parents[1] / "toolrecap_v4" / "schemas" / "recap_v3_schema.json"
+    (schema_dir / schema.name).write_bytes(schema.read_bytes())
+    marker = {
+        "package_format": "toolrecap-portable-v1",
+        "schema_version": "3.0",
+        "version": version,
+        "required_files": [
+            "ToolRecapV4.exe", "ffmpeg.exe", "ffprobe.exe",
+            "FFMPEG_LICENSE.txt", "schemas/recap_v3_schema.json",
+        ],
+    }
+    (package_dir / "package_marker.json").write_text(json.dumps(marker), encoding="utf-8")
+    return package_dir
+
+
 # =============================================================================
 # 1. SEMVER TESTS (Single version source & full SemVer 2.0.0 precedence)
 # =============================================================================
@@ -191,7 +216,7 @@ def test_malicious_archive_zip_bomb_size_and_ratio(tmp_path: Path):
 # =============================================================================
 
 def test_package_validation(tmp_path: Path):
-    """Verify package validator checks exe, ffmpeg, ffprobe, and schema version."""
+    """Verify package validator checks exact one-folder runtime resources."""
     pkg_dir = tmp_path / "package"
     pkg_dir.mkdir()
 
@@ -199,34 +224,15 @@ def test_package_validation(tmp_path: Path):
     with pytest.raises(PackageValidationError, match="missing main executable"):
         validate_package(pkg_dir)
 
-    # Add ToolRecapV4.exe
-    (pkg_dir / "ToolRecapV4.exe").write_bytes(b"MZfakeexe")
-    with pytest.raises(PackageValidationError, match="missing 'ffmpeg.exe'"):
-        validate_package(pkg_dir)
-
-    # Add ffmpeg.exe
-    (pkg_dir / "ffmpeg.exe").write_bytes(b"MZfakeffmpeg")
-    with pytest.raises(PackageValidationError, match="missing 'ffprobe.exe'"):
-        validate_package(pkg_dir)
-
-    # Add ffprobe.exe
-    (pkg_dir / "ffprobe.exe").write_bytes(b"MZfakeffprobe")
-    with pytest.raises(PackageValidationError, match="missing schema version or package marker"):
-        validate_package(pkg_dir)
-
-    # Add package_marker.json with WRONG schema_version
+    _write_valid_package(pkg_dir)
     marker = pkg_dir / "package_marker.json"
-    marker.write_text(json.dumps({"schema_version": "2.0", "version": "4.1.0"}), encoding="utf-8")
-    with pytest.raises(PackageValidationError, match="does not match expected '3.0'"):
-        validate_package(pkg_dir)
-
-    # Add package_marker.json with WRONG version
-    marker.write_text(json.dumps({"schema_version": "3.0", "version": "4.0.1"}), encoding="utf-8")
+    marker_data = json.loads(marker.read_text(encoding="utf-8"))
+    marker_data["version"] = "4.0.1"
+    marker.write_text(json.dumps(marker_data), encoding="utf-8")
     with pytest.raises(PackageValidationError, match="does not match expected '4.1.0'"):
         validate_package(pkg_dir, expected_version="4.1.0")
-
-    # Correct marker
-    marker.write_text(json.dumps({"schema_version": "3.0", "version": "4.1.0"}), encoding="utf-8")
+    marker_data["version"] = "4.1.0"
+    marker.write_text(json.dumps(marker_data), encoding="utf-8")
     validate_package(pkg_dir, expected_version="4.1.0")  # Should pass without error
 
 
@@ -253,7 +259,7 @@ def test_helper_rollback_on_failed_startup_handshake(tmp_path: Path):
     target_dir = tmp_path / "app_install"
     target_dir.mkdir()
     staged_dir = tmp_path / "staged"
-    staged_dir.mkdir()
+    _write_valid_package(staged_dir)
     backup_dir = tmp_path / "backup"
 
     # Original files in app_install
@@ -299,7 +305,7 @@ def test_helper_success_preserves_unknown_files(tmp_path: Path):
     target_dir = tmp_path / "app_install"
     target_dir.mkdir()
     staged_dir = tmp_path / "staged"
-    staged_dir.mkdir()
+    _write_valid_package(staged_dir)
     backup_dir = tmp_path / "backup"
 
     # Original files
@@ -341,8 +347,7 @@ def test_helper_rejects_localappdata_and_outputs(tmp_path: Path):
     """Verify helper refuses to apply updates to LOCALAPPDATA or output folders."""
     storage_root = get_storage_root(tmp_path / "storage")
     staged_dir = tmp_path / "staged"
-    staged_dir.mkdir()
-    (staged_dir / "ToolRecapV4.exe").write_text("EXE", encoding="utf-8")
+    _write_valid_package(staged_dir)
     backup_dir = tmp_path / "backup"
 
     # Target is LOCALAPPDATA

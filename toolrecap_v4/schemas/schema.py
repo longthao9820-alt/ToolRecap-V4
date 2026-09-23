@@ -1,12 +1,11 @@
 """Schema loader and validator access."""
 
 import json
-import os
-from pathlib import Path
-import sys
 from typing import Any, Dict
 
 import jsonschema
+
+from toolrecap_v4.runtime import find_resource
 
 _SCHEMA_CACHE: Dict[str, Any] | None = None
 _VALIDATOR_CACHE: jsonschema.protocols.Validator | None = None
@@ -16,31 +15,12 @@ def get_project_schema() -> Dict[str, Any]:
     """Load and return the Recap Project Schema v3 dictionary."""
     global _SCHEMA_CACHE
     if _SCHEMA_CACHE is None:
-        candidates = [
-            Path(__file__).resolve().parent / "recap_v3_schema.json",
-        ]
-        if getattr(sys, "frozen", False):
-            if hasattr(sys, "_MEIPASS"):
-                base_mei = Path(sys._MEIPASS)
-                candidates.extend([
-                    base_mei / "toolrecap_v4" / "schemas" / "recap_v3_schema.json",
-                    base_mei / "schemas" / "recap_v3_schema.json",
-                    base_mei / "recap_v3_schema.json",
-                ])
-            exe_parent = Path(sys.executable).resolve().parent
-            candidates.extend([
-                exe_parent / "schemas" / "recap_v3_schema.json",
-                exe_parent / "toolrecap_v4" / "schemas" / "recap_v3_schema.json",
-                exe_parent / "recap_v3_schema.json",
-            ])
-        for p in candidates:
-            if p.is_file():
-                with open(p, "r", encoding="utf-8") as f:
-                    _SCHEMA_CACHE = json.load(f)
-                break
-        if _SCHEMA_CACHE is None:
-            with open(candidates[0], "r", encoding="utf-8") as f:
-                _SCHEMA_CACHE = json.load(f)
+        schema_path = find_resource(
+            "toolrecap_v4/schemas/recap_v3_schema.json",
+            "schemas/recap_v3_schema.json",
+        )
+        with schema_path.open("r", encoding="utf-8") as handle:
+            _SCHEMA_CACHE = json.load(handle)
     return _SCHEMA_CACHE
 
 

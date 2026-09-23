@@ -22,6 +22,7 @@ from toolrecap_v4.updater.semver import (
     SemVer,
 )
 from toolrecap_v4.updater.validator import (
+    audit_package_contents,
     validate_package,
 )
 
@@ -32,6 +33,7 @@ __all__ = [
     "verify_checksum",
     "safe_extract_zip",
     "validate_package",
+    "audit_package_contents",
     "apply_staged_update_with_rollback",
     "is_process_running",
     "wait_for_process_exit",

@@ -44,6 +44,16 @@ setup_frozen_tcl()
 
 
 def main() -> None:
+    if "--update-handshake" in sys.argv:
+        print("TOOLRECAP_V4_HANDSHAKE_OK")
+        raise SystemExit(0)
+
+    if "--update-helper" in sys.argv:
+        from toolrecap_v4.updater.helper import main as run_update_helper
+
+        run_update_helper()
+        return
+
     if "--selfcheck" in sys.argv:
         from toolrecap_v4.selfcheck import run_selfcheck
 

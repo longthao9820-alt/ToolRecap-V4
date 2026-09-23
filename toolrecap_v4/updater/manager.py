@@ -51,10 +51,12 @@ class UpdateManager:
         storage_root: Optional[Path | str] = None,
         client: Optional[httpx.Client] = None,
         current_version: Optional[str] = None,
+        activity_probe: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.storage_root = get_storage_root(storage_root)
         self.current_version = current_version or __version__
         self.client = client
+        self.activity_probe = activity_probe
         self.staging_dir = self.storage_root / "updates" / "staging"
         self.backup_dir = self.storage_root / "updates" / "backup"
 
@@ -81,6 +83,10 @@ class UpdateManager:
         if self.client is not None:
             return self.client
         return httpx.Client(timeout=30.0)
+
+    def _assert_application_idle(self) -> None:
+        if self.activity_probe is not None and self.activity_probe():
+            raise UpdateInProgressError("A project workflow is active; stop it before updating")
 
     def check_for_updates(
         self,
@@ -200,8 +206,17 @@ class UpdateManager:
         Stages files strictly in LOCALAPPDATA/ToolRecapV4/updates/staging.
         """
         with self.active_guard():
+            self._assert_application_idle()
             if check_result.status != "update_available" or not check_result.zip_url or not check_result.sha256_url:
                 raise UpdateCheckError("No valid update available to download")
+
+            try:
+                latest = SemVer.parse(str(check_result.latest_version or ""))
+                current = SemVer.parse(self.current_version)
+            except ValueError as exc:
+                raise UpdateCheckError(f"Invalid update version: {exc}") from exc
+            if latest <= current:
+                raise UpdateCheckError("Staged update must be newer than the current version")
 
             client = self._get_client()
 
@@ -216,40 +231,43 @@ class UpdateManager:
             if progress_callback:
                 progress_callback(0.3, "Đang tải bản cập nhật...")
             zip_filename = check_result.zip_name or "update.zip"
+            if Path(zip_filename).name != zip_filename or Path(zip_filename).is_absolute():
+                raise UpdateCheckError("Update archive name is unsafe")
             zip_target = self.staging_dir / zip_filename
-
-            with client.stream("GET", check_result.zip_url, follow_redirects=True) as response:
-                response.raise_for_status()
-                with open(zip_target, "wb") as f:
-                    for chunk in response.iter_bytes(chunk_size=65536):
-                        f.write(chunk)
-
-            # 3. Verify SHA256 before extraction
-            if progress_callback:
-                progress_callback(0.7, "Đang kiểm tra mã băm SHA256...")
-            if not verify_checksum(zip_target, expected_sha256):
-                zip_target.unlink(missing_ok=True)
-                raise ChecksumMismatchError(
-                    f"Checksum mismatch for update archive: expected {expected_sha256}"
-                )
-
-            # 4. Safe extract into staged directory
-            if progress_callback:
-                progress_callback(0.85, "Đang giải nén an toàn...")
             staged_extract_dir = self.staging_dir / f"v{check_result.latest_version}"
             if staged_extract_dir.exists():
                 shutil.rmtree(staged_extract_dir, ignore_errors=True)
-            staged_extract_dir.mkdir(parents=True, exist_ok=True)
-
             try:
+                with client.stream("GET", check_result.zip_url, follow_redirects=True) as response:
+                    response.raise_for_status()
+                    expected_length = response.headers.get("content-length")
+                    downloaded = 0
+                    with open(zip_target, "wb") as handle:
+                        for chunk in response.iter_bytes(chunk_size=65536):
+                            downloaded += len(chunk)
+                            handle.write(chunk)
+                    if expected_length is not None and downloaded != int(expected_length):
+                        raise UpdateCheckError("Update download was incomplete")
+
+                if progress_callback:
+                    progress_callback(0.7, "Đang kiểm tra mã băm SHA256...")
+                if not verify_checksum(zip_target, expected_sha256):
+                    raise ChecksumMismatchError(
+                        f"Checksum mismatch for update archive: expected {expected_sha256}"
+                    )
+
+                if progress_callback:
+                    progress_callback(0.85, "Đang giải nén an toàn...")
+                staged_extract_dir.mkdir(parents=True, exist_ok=True)
                 safe_extract_zip(zip_target, staged_extract_dir)
+                if progress_callback:
+                    progress_callback(0.95, "Đang xác thực gói cài đặt...")
+                validate_package(staged_extract_dir, expected_version=check_result.latest_version)
+            except Exception:
+                shutil.rmtree(staged_extract_dir, ignore_errors=True)
+                raise
             finally:
                 zip_target.unlink(missing_ok=True)
-
-            # 5. Validate extracted package contents
-            if progress_callback:
-                progress_callback(0.95, "Đang xác thực gói cài đặt...")
-            validate_package(staged_extract_dir, expected_version=check_result.latest_version)
 
             if progress_callback:
                 progress_callback(1.0, "Tải và kiểm tra bản cập nhật hoàn tất!")
@@ -265,6 +283,8 @@ class UpdateManager:
         """Launch external update helper process to replace files after app exit."""
         staged_path = Path(staged_path).resolve()
         target_dir = Path(target_dir).resolve()
+        self._assert_application_idle()
+        validate_package(staged_path)
 
         if getattr(sys, "frozen", False):
             src_exe = Path(sys.executable).resolve()
