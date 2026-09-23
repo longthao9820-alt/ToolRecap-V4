@@ -39,6 +39,10 @@ def test_unicode_spaces_same_and_different_working_folders(tmp_path):
     s3.mkdir(); s4.mkdir()
     e1, e2 = s3 / "E01.mp4", s3 / "E02.mp4"; e1.write_bytes(b"1"); e2.write_bytes(b"2")
     expected = tmp_path / "Outputs_Chương Trình Season 3"
+    assert derive_working_folder([e1, e2]) == s3
+    assert resolve_publication_root(
+        manual_output_dir="", working_folder=derive_working_folder([e1, e2])
+    ) == expected
     assert resolve_publication_root(manual_output_dir=None, working_folder=derive_working_folder(e1)) == expected
     assert resolve_publication_root(manual_output_dir=None, working_folder=derive_working_folder(e2)) == expected
     assert resolve_publication_root(manual_output_dir=None, working_folder=s4) == tmp_path / "Outputs_S04"
@@ -84,6 +88,14 @@ def test_auto_resolution_not_persisted_or_created_during_project_creation(tmp_pa
     assert Path(state["output_dir"]) == source.parent.parent / "Outputs_S03"
     assert not Path(state["output_dir"]).exists()
     assert SettingsLikeBlank().output_dir == ""
+    other = tmp_path / "Other" / "S02" / "E01.mp4"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"other")
+    second = ProjectWorkflow(persistence=persistence).create_project(
+        "project-2", "Project2", other, settings=AppSettings(output_dir="")
+    )
+    assert second["manual_output_dir"] == ""
+    assert Path(second["output_dir"]) == other.parent.parent / "Outputs_S02"
 
 
 class SettingsLikeBlank:
@@ -121,10 +133,44 @@ def test_manual_destination_change_reuses_voice_final_json_and_zero_ai(tmp_path,
     voice=MagicMock();voice.synthesize.return_value=wav.getvalue();workflow=ProjectWorkflow(persistence=persistence,gateway_client=gateway,voice_adapter=voice)
     monkeypatch.setattr("toolrecap_v4.workflow.probe_media",lambda *a,**k:SimpleNamespace(duration=1.0))
     workflow.import_project("project-1","Project",source,_final("project-1",source.name,True),output_dir=a)
-    monkeypatch.setattr("toolrecap_v4.workflow.render_output",lambda **kwargs:_render_result(Path(kwargs["output_dir"])))
+    render_calls=[]
+    def render(**kwargs):
+        render_calls.append(Path(kwargs["output_dir"]))
+        return _render_result(Path(kwargs["output_dir"]))
+    monkeypatch.setattr("toolrecap_v4.workflow.render_output",render)
     before=persistence._final_path("project-1").read_bytes();workflow.start_project("project-1",settings=AppSettings(output_dir=str(a)));assert voice.synthesize.call_count==1
     workflow.retry_project("project-1",settings=AppSettings(output_dir=str(b)))
     assert voice.synthesize.call_count==1 and (b/"Human Title.mp4").is_file() and persistence._final_path("project-1").read_bytes()==before
+    assert render_calls == [a, b]
+    assert gateway.submit_text_chat.call_count==gateway.submit_image_chat.call_count==0
+
+
+def test_partial_three_output_resume_uses_resolved_destination_and_zero_ai(tmp_path, monkeypatch):
+    source=tmp_path/"Show"/"S03"/"E01.mp4";source.parent.mkdir(parents=True);source.write_bytes(b"source")
+    publication=tmp_path/"Published";persistence=ProjectPersistence(storage_root=tmp_path/"managed");gateway=MagicMock(spec=GatewayClient)
+    final=_final("project-1",source.name)
+    final["outputs"]=[
+        {**final["outputs"][0],"render_id":f"out_{number:03d}","title":f"Part {number}"}
+        for number in (1,2,3)
+    ]
+    workflow=ProjectWorkflow(persistence=persistence,gateway_client=gateway)
+    monkeypatch.setattr("toolrecap_v4.workflow.probe_media",lambda *a,**k:SimpleNamespace(duration=1.0))
+    workflow.import_project("project-1","Project",source,final,output_dir=publication)
+    calls=[]
+    def render(**kwargs):
+        title=kwargs["output_def"]["title"];calls.append(title)
+        output_dir=Path(kwargs["output_dir"]);output_dir.mkdir(parents=True,exist_ok=True)
+        video=output_dir/f"{title}.mp4";video.write_bytes(title.encode())
+        return SimpleNamespace(output_path=video,narration_srt_path=output_dir/f"{title}.narration.srt",original_srt_path=output_dir/f"{title}.original.srt",duration=1.0,video_codec="h264",audio_codec="aac",width=640,height=480,fps=25.0)
+    monkeypatch.setattr("toolrecap_v4.workflow.render_output",render)
+    workflow.start_project("project-1")
+    (publication/"Part 2.mp4").unlink()
+    calls.clear()
+    resumed=workflow.resume_project("project-1")
+    assert calls == ["Part 2"]
+    assert resumed["outputs"]["out_001"]["status"] == "skipped"
+    assert resumed["outputs"]["out_002"]["status"] == "completed"
+    assert resumed["outputs"]["out_003"]["status"] == "skipped"
     assert gateway.submit_text_chat.call_count==gateway.submit_image_chat.call_count==0
 
 

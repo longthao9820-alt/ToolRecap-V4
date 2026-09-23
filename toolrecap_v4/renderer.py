@@ -118,6 +118,31 @@ def compute_file_sha256(path: Path | str) -> str:
     return h.hexdigest()
 
 
+def _stage_and_publish_files(
+    files: Sequence[tuple[Path, Path]],
+    *,
+    cancellation_token: CancellationToken | None = None,
+) -> None:
+    """Stage every publication file beside its target and always remove staging files."""
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for source, destination in files:
+            file_descriptor, staging_name = tempfile.mkstemp(
+                prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent,
+            )
+            os.close(file_descriptor)
+            staging = Path(staging_name)
+            staged.append((staging, destination))
+            shutil.copy2(source, staging)
+        if cancellation_token:
+            cancellation_token.check_cancelled()
+        for staging, destination in staged:
+            staging.replace(destination)
+    finally:
+        for staging, _destination in staged:
+            staging.unlink(missing_ok=True)
+
+
 def calculate_ducking_gains(
     original_db: float,
     commentary_db: float,
@@ -607,17 +632,13 @@ def render_output(
                 f"Rendered canvas mismatch: expected {canvas_w}x{canvas_h}, got {final_probe.width}x{final_probe.height}"
             )
 
-        # Atomic publication: copy to staging in target dir, then replace
+        # Stage all publication files in the target directory, then atomically replace each target.
         published_files: list[tuple[Path, Path]] = [
             (temp_final_mp4, target_mp4),
             (temp_narr_srt, target_narr_srt),
             (temp_orig_srt, target_orig_srt),
         ]
-
-        for src_f, dst_f in published_files:
-            staging_f = dst_f.with_suffix(f"{dst_f.suffix}.tmp_{os.getpid()}")
-            shutil.copy2(src_f, staging_f)
-            staging_f.replace(dst_f)
+        _stage_and_publish_files(published_files, cancellation_token=cancellation_token)
 
         v_codec = final_probe.video_streams[0].codec if final_probe.video_streams else "h264"
         a_codec = final_probe.audio_streams[0].codec if final_probe.audio_streams else "aac"

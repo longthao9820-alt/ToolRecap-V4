@@ -38,6 +38,7 @@ from toolrecap_v4.errors import (
 )
 from toolrecap_v4.media import probe_media
 from toolrecap_v4.renderer import (
+    _stage_and_publish_files,
     RenderError,
     RenderResult,
     SourceCollisionError,
@@ -52,6 +53,32 @@ from toolrecap_v4.renderer import (
 from toolrecap_v4.settings import AppSettings
 from toolrecap_v4.subtitles import parse_srt
 from toolrecap_v4.voice_studio import VoiceStudioAdapter
+
+
+def test_publication_staging_cleanup_on_copy_failure(tmp_path: Path, monkeypatch) -> None:
+    """A failed publication preflight leaves neither user outputs nor neighbor temp files."""
+    first = tmp_path / "first.source"
+    second = tmp_path / "second.source"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    targets = [(first, tmp_path / "first.mp4"), (second, tmp_path / "second.srt")]
+    real_copy = __import__("shutil").copy2
+    calls = 0
+
+    def fail_second_copy(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated publication failure")
+        return real_copy(source, destination)
+
+    monkeypatch.setattr("toolrecap_v4.renderer.shutil.copy2", fail_second_copy)
+    with pytest.raises(OSError, match="simulated publication failure"):
+        _stage_and_publish_files(targets)
+
+    assert not targets[0][1].exists()
+    assert not targets[1][1].exists()
+    assert {path.name for path in tmp_path.iterdir()} == {first.name, second.name}
 
 
 def _create_wav_bytes(duration_s: float, sample_rate: int = 24000) -> bytes:
