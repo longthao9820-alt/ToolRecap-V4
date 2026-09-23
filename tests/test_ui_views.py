@@ -462,6 +462,10 @@ def test_settings_dialog_dual_model_and_reasoning_save_and_callbacks(tmp_path: P
         # Update dual model and reasoning fields
         dialog.var_gw_sub_model.set("ag/custom-sub-v1")
         dialog.var_gw_sub_reasoning.set("high")
+        dialog.var_scanner_parallelism.set(5)
+        dialog.var_scanner_chunk_ms.set(180000)
+        dialog.var_vision_model.set("vision/custom-v1")
+        dialog.var_vision_reasoning.set("medium")
         dialog.var_gw_prime_model.set("ag/custom-prime-v1")
         dialog.var_gw_prime_reasoning.set("low")
 
@@ -475,6 +479,12 @@ def test_settings_dialog_dual_model_and_reasoning_save_and_callbacks(tmp_path: P
         assert saved_settings.gateway_sub_reasoning == "high"
         assert saved_settings.gateway_prime_model == "ag/custom-prime-v1"
         assert saved_settings.gateway_prime_reasoning == "low"
+        assert saved_settings.scanner_model == "ag/custom-sub-v1"
+        assert saved_settings.scanner_parallelism == 5
+        assert saved_settings.scanner_chunk_duration_ms == 180000
+        assert saved_settings.vision_model == "vision/custom-v1"
+        assert saved_settings.finalizer_model == "ag/custom-prime-v1"
+        assert saved_settings.planner_model == saved_settings.writer_model == "ag/custom-prime-v1"
 
         # Invariant: settings persisted to disk
         mgr = SettingsManager(persistence=persistence)
@@ -483,6 +493,8 @@ def test_settings_dialog_dual_model_and_reasoning_save_and_callbacks(tmp_path: P
         assert loaded.gateway_sub_reasoning == "high"
         assert loaded.gateway_prime_model == "ag/custom-prime-v1"
         assert loaded.gateway_prime_reasoning == "low"
+        assert loaded.vision_model == "vision/custom-v1"
+        assert loaded.finalizer_model == "ag/custom-prime-v1"
 
         dialog.destroy()
     finally:

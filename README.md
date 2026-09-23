@@ -1,13 +1,13 @@
-# Hướng dẫn sử dụng ToolRecap V4 (Phase 9 Writer Validation & Final JSON)
+# Hướng dẫn sử dụng ToolRecap V4 (Phase 10 AI Gateway Settings)
 
 ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tóm tắt và dựng video recap từ video nguồn.
 
 ---
 
-## 1. Trạng thái hiện tại: Phase 9 Targeted Repair & Schema 3.0 Final JSON
+## 1. Trạng thái hiện tại: Phase 10 AI Gateway Settings UI
 
 > **LƯU Ý TRUNG THỰC VỀ TIẾN ĐỘ & BẢN DỰNG:**
-> Hiện tại dự án đã hoàn thành **Phase 9 (Per-Output Validation, Targeted Repair & Deterministic Final JSON)**:
+> Hiện tại dự án đã hoàn thành **Phase 10 (AI Gateway Settings UI & Secure Migration)**:
 > - **Hệ thống chuẩn bị nguồn cục bộ hoàn chỉnh**: Mô-đun `toolrecap_v4.analysis` xử lý trích xuất phụ đề, bóc tách âm thanh, nhận diện tiếng nói và lưu trữ tạo tác chuẩn bị có kiểm soát chất lượng.
 > - **Thứ tự ưu tiên trích xuất hội thoại nghiêm ngặt**:
 >   1. Phụ đề rời tiếng Anh (Sidecar text: SRT, VTT, ASS) với khả năng làm sạch thẻ định dạng.
@@ -71,11 +71,17 @@ ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tó
 >   - Application mapping giữ canonical Season Plan order, không AI merge, không rerank/rewrite narration.
 >   - Final artifact được kiểm bằng canonical validator/schema 3.0 rồi ghi atomic và reuse theo semantic revision.
 >   - Locked zero-output plan không bị bịa output; hiện dừng rõ bằng `ZeroOutputError` vì canonical application validator không chấp nhận outputs rỗng.
+> - **AI Gateway Settings UI**:
+>   - Endpoint và API Key có thể cấu hình trực tiếp; API key masked và chỉ lưu qua Windows DPAPI, không nằm trong `settings.json`.
+>   - Scanner model/reasoning/parallelism/chunk duration và Vision model/reasoning được expose đúng backend hiện tại.
+>   - Finalizer model/reasoning là user-facing canonical setting cho Planner, final refinement, Writer và repair.
+>   - Legacy stage-specific values khác nhau được giữ nguyên khi chỉ mở/Cancel; chỉ explicit Save với unified Finalizer mới đồng bộ các stage.
+>   - `Test Scanner` và `Test Finalizer` dùng unsaved form values trong background, không cần project, không save ngầm và không tạo analysis artifacts.
 > - **Workflow kiểm soát chặt chẽ**:
 >   - Khi dự án đã có Final JSON hợp lệ hoặc được import từ trước: chạy thẳng vào luồng dựng (render), thực hiện chính xác 0 lượt gọi Gateway và 0 lượt chạy chuẩn bị nguồn.
 >   - Khi các model cần thiết đã cấu hình: ... → independent Writers → targeted validation/repair → schema 3.0 Final JSON → `FINAL_JSON_READY`, sau đó dừng trước Phase 10/11.
 >   - Fresh install chưa cấu hình Scanner model dừng rõ ràng ở `PREPARED`; ID model là free text, provider-neutral. Settings cũ được migrate nguyên literal từ `gateway_sub_model`.
-> - **CHƯA CÓ CÁC TÍNH NĂNG PHASE 10+**: Gateway settings UI redesign, verified VoiceStudio/Audio Mix/render integration, Output Directory Resolver, packaging và real production acceptance CHƯA được triển khai.
+> - **CHƯA CÓ CÁC TÍNH NĂNG PHASE 11+**: verified VoiceStudio/Audio Mix/render integration, Output Directory Resolver, packaging và real production acceptance CHƯA được triển khai.
 > - **CHƯA CÓ BẢN DỰNG EXE**: Chưa chạy đóng gói `build_portable.py` / PyInstaller; chưa có tệp `ToolRecapV4.exe` trong `dist/` hoặc bản nén trong `release/`.
 > - **MỤC TIÊU CẬP NHẬT CHƯA XÁC MINH PHÁT HÀNH**: Cấu hình kho cập nhật đích `longthao9820-alt/ToolRecap-V4` là định danh cấu hình, chưa có bản release thực tế trên remote.
 

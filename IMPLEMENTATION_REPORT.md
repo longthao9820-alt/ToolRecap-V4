@@ -1,12 +1,12 @@
-# ToolRecap V4 — Implementation & Verification Report (Phase 9 Validation, Repair & Final JSON)
+# ToolRecap V4 — Implementation & Verification Report (Phase 10 AI Gateway Settings UI)
 
 **Date**: 2026-09-22  
-**Contract**: Phase 9 — Per-Output Validation + Targeted Repair + Deterministic Final JSON
+**Contract**: Phase 10 — AI Gateway Settings UI + Secure Settings Migration
 **Project**: ToolRecap V4  
 **Target Platform**: Windows 10/11 x64 Portable  
 **Version**: v4.0.0  
-**Phase**: Phase 9 — Deterministic Output Validation, Repair and Schema 3.0 Assembly
-**Status**: Phase 9 IMPLEMENTED; canonical Final JSON stops before Phase 10/11 UI and rendering verification.
+**Phase**: Phase 10 — Provider-Neutral Gateway UI, Secure Secrets, Diagnostics & Migration
+**Status**: Phase 10 IMPLEMENTED; Voice/Audio Mix/Render verification remains Phase 11.
 
 ---
 
@@ -24,6 +24,18 @@ This report documents the implementation and verification of **Phase 9** of the 
 - **Phase 7 (Selective Visual Evidence & Season Plan)**: Added deterministic Planner-requested range IDs, local bounded frame extraction, safe still-image Vision, factual Visual Evidence, empty-visual completion, final Planner refinement, deterministic application-owned output IDs, immutable locked `season_plan.json`, cache reuse and `SEASON_PLAN_READY` workflow integration.
 - **Phase 8 (Independent Writers)**: Added deterministic Writer jobs from locked `out_###` entries, authoritative Full/Visual Evidence context, verbatim raw prompt, provider-neutral text-only requests, bounded parallelism, per-output raw checkpoints/cache/resume, best-effort structured extraction and `WRITER_DRAFTS_READY` workflow integration.
 - **Phase 9 (Validation/Repair/Merge)**: Added deterministic per-output issue codes, invalid-only bounded repair, repair recovery/provenance, immutable validated outputs, application-owned schema 3.0 mapping, canonical validation, atomic Final JSON checkpoint/reuse and `FINAL_JSON_READY` workflow integration.
+- **Phase 10 (Gateway Settings)**: Added provider-neutral Scanner/Vision/Finalizer controls, secure transactional API-key save, legacy stage-preserving migration, unified explicit Finalizer mapping, unsaved-value background diagnostics and settings dependency wiring.
+
+### Exact Scope Executed in Phase 10
+
+1. Compact AI Gateway pane exposes endpoint, masked API key, Scanner model/reasoning/parallelism/chunk milliseconds, Vision model/reasoning and unified Finalizer model/reasoning.
+2. Model inputs are provider-neutral free text; fresh defaults are empty and no capability is inferred from model names.
+3. DPAPI entropy and V3 description remain unchanged; normal settings persistence rejects/leaks no secret.
+4. UI-independent controller validates form values, performs atomic settings/secret save with rollback, and supports diagnostics from unsaved values.
+5. Legacy split Planner/Writer/Prime values are preserved when different; explicit unified Finalizer Save alone updates all intended creative stages.
+6. Test Scanner/Finalizer use one bounded model-availability request, no prompt/project/media/artifacts, background thread work and Tk-main-thread result polling.
+7. Save is explicit, Cancel does not mutate effective settings, unknown unrelated settings survive persistence, and existing Voice/Audio Mix/render controls remain intact.
+8. Phase 3–9 dependency semantics and existing Final JSON zero-AI path are unchanged.
 
 ### Exact Scope Executed in Phase 9
 
@@ -183,6 +195,8 @@ All validation suites executed and passed cleanly:
 - Phase 8 closure focused coverage: **20 targeted Writer context/integrity/execution/cache/response-boundary tests** plus updated workflow/bypass assertions.
 - Phase 9 closure full suite: **526 passed in 67.39s**, 0 failures, 0 errors, 0 skipped.
 - Phase 9 focused coverage: **25 validation/repair/mapping/revision/zero-output tests** plus updated workflow/bypass assertions.
+- Phase 10 final full suite: **541 passed in 72.60s**, 0 failures, 0 errors, 0 skipped.
+- Phase 10 settings/UI focused suite: **39 passed**, including 15 new secure migration/diagnostic/controller tests.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
   - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
@@ -240,11 +254,12 @@ All validation suites executed and passed cleanly:
 
 ---
 
-## 4. Explicit Limitations & Boundaries (Phase 10+ Scope)
+## 4. Explicit Limitations & Boundaries (Phase 11+ Scope)
 
 - **General scene Vision boundary**: Selective Planner-requested still-image Vision is implemented in Phase 7. Full-episode/season scans, video upload and arbitrary sampling remain prohibited.
 - **Writer validation/repair and Final JSON**: IMPLEMENTED in Phase 9.
-- **Gateway settings UI redesign, verified Voice/Audio Mix/render integration and Output Directory Resolver**: NOT implemented; remain later scope.
+- **AI Gateway settings UI and secure migration**: IMPLEMENTED in Phase 10.
+- **Verified Voice/Audio Mix/render integration and Output Directory Resolver**: NOT implemented; remain later scope.
 - **Output Writers**: IMPLEMENTED in Phase 8 as independent response-capture jobs.
 - **Executable Packaging**: Portable binary packaging via `build_portable.py` / PyInstaller was not run; no `dist/ToolRecapV4.exe` exists in this phase.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.

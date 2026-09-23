@@ -4,7 +4,7 @@ Invariants:
 - Exactly 4 sidebar panes: Recap, AI Gateway, Voice, Render and Output.
 - Geometry: 920x680, minsize: 840x600.
 - DPAPI secret storage: masked credentials, never saved to settings.json.
-- AI Gateway: ONLY one gateway model and thinking, no legacy Scanner/Finalizer split.
+- AI Gateway: provider-neutral Scanner, Vision, and unified Finalizer controls.
 - Voice: external VoiceStudio modes (auto/local/remote) instead of local runtime repair.
 - Recap / Prompt: exact user prompt, no editorial policies, reset clears to empty string.
 - Voice preview and render use the exact same VoiceStudioAdapter.
@@ -16,6 +16,7 @@ Invariants:
 from __future__ import annotations
 
 import logging
+import queue
 from pathlib import Path
 import sys
 import threading
@@ -25,10 +26,10 @@ from typing import Any, Callable, Dict, List, Optional
 import urllib.parse
 
 from toolrecap_v4.__version__ import __version__
-from toolrecap_v4.gateway import GatewayClient
+from toolrecap_v4.gateway import GatewayClient, sanitize_message
 from toolrecap_v4.persistence import ProjectPersistence
 from toolrecap_v4.secrets import DPAPISecretStore
-from toolrecap_v4.settings import AppSettings, SettingsManager
+from toolrecap_v4.settings import AppSettings, GatewayFormValues, GatewaySettingsController, REASONING_VALUES, SettingsManager
 from toolrecap_v4.ui.notifications import WindowsNotificationService
 from toolrecap_v4.updater import UpdateCheckResult, UpdateManager
 from toolrecap_v4.voice_studio import (
@@ -142,6 +143,7 @@ class SettingsDialog(tk.Toplevel):
         self.persistence = persistence or ProjectPersistence()
         self.settings_manager = settings_manager or SettingsManager(persistence=self.persistence)
         self.secret_store = DPAPISecretStore(storage_root=self.persistence.root)
+        self.gateway_controller = GatewaySettingsController(self.settings_manager, self.secret_store)
         self.on_saved = on_saved or on_save
         self.settings = settings or self.settings_manager.load()
 
@@ -181,25 +183,30 @@ class SettingsDialog(tk.Toplevel):
         self.rights_var = tk.StringVar(value=getattr(val, "source_rights_status", "UNVERIFIED") or "UNVERIFIED")
         self.var_prompt_status = tk.StringVar()
 
-        # AI Gateway variables (Dual Sub/Prime models + reasoning)
+        # Phase 10 provider-neutral Scanner / Vision / Finalizer settings.
         self.gateway_enabled_var = tk.BooleanVar(value=True)
         self.var_gw_endpoint = tk.StringVar(value=val.gateway_endpoint)
         self.var_gw_key = tk.StringVar()
         self.var_gw_key_visible = tk.BooleanVar(value=False)
 
-        sub_model_val = getattr(val, "gateway_sub_model", None) or getattr(val, "gateway_model", "sub") or "sub"
+        sub_model_val = getattr(val, "scanner_model", "") or getattr(val, "gateway_sub_model", "") or getattr(val, "gateway_model", "")
         self.var_gw_sub_model = tk.StringVar(value=sub_model_val)
-        self.var_gw_sub_reasoning = tk.StringVar(value=getattr(val, "gateway_sub_reasoning", "") or "")
+        self.var_gw_sub_reasoning = tk.StringVar(value=getattr(val, "scanner_reasoning", "") or getattr(val, "gateway_sub_reasoning", "") or "")
+        self.var_scanner_parallelism = tk.IntVar(value=val.scanner_parallelism)
+        self.var_scanner_chunk_ms = tk.IntVar(value=val.scanner_chunk_duration_ms)
+        self.var_vision_model = tk.StringVar(value=val.vision_model)
+        self.var_vision_reasoning = tk.StringVar(value=val.vision_reasoning)
 
-        prime_model_val = getattr(val, "gateway_prime_model", None) or "prime"
+        prime_model_val, prime_reasoning_val, self._finalizer_values_unified = val.finalizer_ui_values()
         self.var_gw_prime_model = tk.StringVar(value=prime_model_val)
-        self.var_gw_prime_reasoning = tk.StringVar(value=getattr(val, "gateway_prime_reasoning", "") or "")
+        self.var_gw_prime_reasoning = tk.StringVar(value=prime_reasoning_val)
 
         self.var_gw_model = self.var_gw_sub_model
         self.var_gw_thinking = tk.BooleanVar(value=bool(val.gateway_thinking or val.gateway_sub_reasoning or val.gateway_prime_reasoning))
 
-        self.sub_status_var = tk.StringVar(value="Sub model chưa được kiểm tra.")
-        self.prime_status_var = tk.StringVar(value="Prime model chưa được kiểm tra.")
+        self.sub_status_var = tk.StringVar(value="Scanner chưa được kiểm tra.")
+        self.prime_status_var = tk.StringVar(value="Finalizer chưa được kiểm tra." if self._finalizer_values_unified else "Các stage Finalizer cũ đang dùng model khác nhau; chỉ đồng bộ khi bấm Lưu.")
+        self._gateway_test_running = {"scanner": False, "finalizer": False}
         self.ai_status_var = self.sub_status_var
 
         # Dual model compatibility aliases
@@ -499,19 +506,19 @@ class SettingsDialog(tk.Toplevel):
         self._update_prompt_status()
 
     # -------------------------------------------------------------------------
-    # PANE 2: AI GATEWAY (Dual Sub/Prime Models + Reasoning Combos + Test Buttons)
+    # PANE 2: AI GATEWAY (provider-neutral Scanner / Vision / Finalizer)
     # -------------------------------------------------------------------------
     def _build_ai(self, parent: ttk.Frame) -> ttk.Frame:
         frame = ttk.Frame(parent)
         frame.columnconfigure(1, weight=1)
 
-        ttk.Label(frame, text="Cấu hình AI Gateway (Sub & Prime)", font=("Segoe UI Semibold", 14)).grid(
+        ttk.Label(frame, text="AI Gateway", font=("Segoe UI Semibold", 14)).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 10)
         )
 
         chk_gw = ttk.Checkbutton(
             frame,
-            text="Kích hoạt phân tích kịch bản bằng AI Gateway",
+            text="Kích hoạt phân tích bằng AI Gateway / 9Router",
             variable=self.gateway_enabled_var,
         )
         chk_gw.grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 6))
@@ -530,38 +537,49 @@ class SettingsDialog(tk.Toplevel):
         )
         self.show_key_check.grid(row=3, column=2, sticky="w")
 
-        # -------------------------------------------------------------
-        # Sub Stage: Video analysis model & reasoning
-        # -------------------------------------------------------------
         ttk.Separator(frame, orient="horizontal").grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 6))
-        ttk.Label(frame, text="Giai đoạn 1: Sub Model (Phân tích Video)", font=("Segoe UI Semibold", 10)).grid(
+        ttk.Label(frame, text="Scanner", font=("Segoe UI Semibold", 10)).grid(
             row=5, column=0, columnspan=3, sticky="w", pady=(0, 4)
         )
 
-        ttk.Label(frame, text="Sub model:").grid(row=6, column=0, sticky="w", pady=3)
+        ttk.Label(frame, text="Model:").grid(row=6, column=0, sticky="w", pady=3)
         self.sub_model_combo = ttk.Combobox(
             frame,
             textvariable=self.var_gw_sub_model,
-            values=["sub", "ag/gemini-3.8-flash", "ag/gemini-2.5-flash", "ag/gemini-2.5-pro"],
+            values=(),
         )
         self.sub_model_combo.grid(row=6, column=1, columnspan=2, sticky="ew", padx=(10, 0), pady=3)
         self.sub_model_entry = self.sub_model_combo
         self.model_combo = self.sub_model_combo
 
-        ttk.Label(frame, text="Sub reasoning:").grid(row=7, column=0, sticky="w", pady=3)
+        ttk.Label(frame, text="Reasoning:").grid(row=7, column=0, sticky="w", pady=3)
         self.sub_reasoning_combo = ttk.Combobox(
             frame,
             textvariable=self.var_gw_sub_reasoning,
-            values=["", "low", "medium", "high"],
+            values=REASONING_VALUES,
             state="readonly",
         )
         self.sub_reasoning_combo.grid(row=7, column=1, columnspan=2, sticky="ew", padx=(10, 0), pady=3)
 
+        ttk.Label(frame, text="Parallelism (1–32):").grid(row=8, column=0, sticky="w", pady=3)
+        self.scanner_parallelism_spin = ttk.Spinbox(frame, from_=1, to=32, textvariable=self.var_scanner_parallelism)
+        self.scanner_parallelism_spin.grid(row=8, column=1, columnspan=2, sticky="ew", padx=(10, 0), pady=3)
+        ttk.Label(frame, text="Chunk duration (ms):").grid(row=9, column=0, sticky="w", pady=3)
+        self.scanner_chunk_spin = ttk.Spinbox(frame, from_=1000, to=3600000, increment=1000, textvariable=self.var_scanner_chunk_ms)
+        self.scanner_chunk_spin.grid(row=9, column=1, columnspan=2, sticky="ew", padx=(10, 0), pady=3)
+
+        ttk.Label(frame, text="Vision model:").grid(row=10, column=0, sticky="w", pady=3)
+        self.vision_model_entry = ttk.Entry(frame, textvariable=self.var_vision_model)
+        self.vision_model_entry.grid(row=10, column=1, columnspan=2, sticky="ew", padx=(10, 0), pady=3)
+        ttk.Label(frame, text="Vision reasoning:").grid(row=11, column=0, sticky="w", pady=3)
+        self.vision_reasoning_combo = ttk.Combobox(frame, textvariable=self.var_vision_reasoning, values=REASONING_VALUES, state="readonly")
+        self.vision_reasoning_combo.grid(row=11, column=1, columnspan=2, sticky="ew", padx=(10, 0), pady=3)
+
         sub_btn_box = ttk.Frame(frame)
-        sub_btn_box.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(4, 2))
+        sub_btn_box.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(4, 2))
         self.btn_test_sub = ttk.Button(
             sub_btn_box,
-            text="Kiểm tra Sub model",
+            text="Test Scanner",
             command=self._test_sub_connection,
         )
         self.btn_test_sub.pack(side="left")
@@ -574,41 +592,38 @@ class SettingsDialog(tk.Toplevel):
             wraplength=600,
             font=("Segoe UI", 9),
         )
-        self.lbl_sub_test_result.grid(row=9, column=0, columnspan=3, sticky="w", pady=(2, 6))
+        self.lbl_sub_test_result.grid(row=13, column=0, columnspan=3, sticky="w", pady=(2, 6))
         self.lbl_gw_test_result = self.lbl_sub_test_result
         self.ai_status_lbl = self.lbl_sub_test_result
 
-        # -------------------------------------------------------------
-        # Prime Stage: Synthesis model & reasoning
-        # -------------------------------------------------------------
-        ttk.Separator(frame, orient="horizontal").grid(row=10, column=0, columnspan=3, sticky="ew", pady=(6, 6))
-        ttk.Label(frame, text="Giai đoạn 2: Prime Model (Tổng hợp & Tạo JSON)", font=("Segoe UI Semibold", 10)).grid(
-            row=11, column=0, columnspan=3, sticky="w", pady=(0, 4)
+        ttk.Separator(frame, orient="horizontal").grid(row=14, column=0, columnspan=3, sticky="ew", pady=(6, 6))
+        ttk.Label(frame, text="Finalizer", font=("Segoe UI Semibold", 10)).grid(
+            row=15, column=0, columnspan=3, sticky="w", pady=(0, 4)
         )
 
-        ttk.Label(frame, text="Prime model:").grid(row=12, column=0, sticky="w", pady=3)
+        ttk.Label(frame, text="Model:").grid(row=16, column=0, sticky="w", pady=3)
         self.prime_model_combo = ttk.Combobox(
             frame,
             textvariable=self.var_gw_prime_model,
-            values=["prime", "ag/gemini-3.8-flash", "ag/gemini-2.5-flash", "ag/gemini-2.5-pro"],
+            values=(),
         )
-        self.prime_model_combo.grid(row=12, column=1, columnspan=2, sticky="ew", padx=(10, 0), pady=3)
+        self.prime_model_combo.grid(row=16, column=1, columnspan=2, sticky="ew", padx=(10, 0), pady=3)
         self.prime_model_entry = self.prime_model_combo
 
-        ttk.Label(frame, text="Prime reasoning:").grid(row=13, column=0, sticky="w", pady=3)
+        ttk.Label(frame, text="Reasoning:").grid(row=17, column=0, sticky="w", pady=3)
         self.prime_reasoning_combo = ttk.Combobox(
             frame,
             textvariable=self.var_gw_prime_reasoning,
-            values=["", "low", "medium", "high"],
+            values=REASONING_VALUES,
             state="readonly",
         )
-        self.prime_reasoning_combo.grid(row=13, column=1, columnspan=2, sticky="ew", padx=(10, 0), pady=3)
+        self.prime_reasoning_combo.grid(row=17, column=1, columnspan=2, sticky="ew", padx=(10, 0), pady=3)
 
         prime_btn_box = ttk.Frame(frame)
-        prime_btn_box.grid(row=14, column=0, columnspan=3, sticky="ew", pady=(4, 2))
+        prime_btn_box.grid(row=18, column=0, columnspan=3, sticky="ew", pady=(4, 2))
         self.btn_test_prime = ttk.Button(
             prime_btn_box,
-            text="Kiểm tra Prime model",
+            text="Test Finalizer",
             command=self._test_prime_connection,
         )
         self.btn_test_prime.pack(side="left")
@@ -620,7 +635,7 @@ class SettingsDialog(tk.Toplevel):
             wraplength=600,
             font=("Segoe UI", 9),
         )
-        self.lbl_prime_test_result.grid(row=15, column=0, columnspan=3, sticky="w", pady=(2, 6))
+        self.lbl_prime_test_result.grid(row=19, column=0, columnspan=3, sticky="w", pady=(2, 6))
 
         self.chk_thinking = ttk.Checkbutton(
             frame,
@@ -636,7 +651,7 @@ class SettingsDialog(tk.Toplevel):
             foreground="#6b7280",
             wraplength=600,
         )
-        note.grid(row=16, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        note.grid(row=20, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         return frame
 
@@ -644,69 +659,57 @@ class SettingsDialog(tk.Toplevel):
         if hasattr(self, "key_entry") and self.key_entry is not None:
             self.key_entry.configure(show="" if self.var_gw_key_visible.get() else "●")
 
-    def _test_sub_connection(self) -> None:
-        """Test Sub model connection using provider-neutral model availability check (transitional)."""
-        endpoint = self.var_gw_endpoint.get().strip()
-        model = self.var_gw_sub_model.get().strip()
-        key_input = self.var_gw_key.get()
-        api_key = self.secret_store.get_secret("gateway_api_key") if key_input == MASKED_SECRET_PLACEHOLDER else key_input
+    def _gateway_form_values(self) -> GatewayFormValues:
+        return GatewayFormValues(
+            endpoint=self.var_gw_endpoint.get(), api_key=self.var_gw_key.get(),
+            scanner_model=self.var_gw_sub_model.get(), scanner_reasoning=self.var_gw_sub_reasoning.get(),
+            scanner_parallelism=int(self.var_scanner_parallelism.get()), scanner_chunk_duration_ms=int(self.var_scanner_chunk_ms.get()),
+            vision_model=self.var_vision_model.get(), vision_reasoning=self.var_vision_reasoning.get(),
+            finalizer_model=self.var_gw_prime_model.get(), finalizer_reasoning=self.var_gw_prime_reasoning.get(),
+        )
 
-        if not endpoint or not model:
-            messagebox.showwarning("AI Gateway", "Endpoint và Sub model không được để trống.", parent=self)
+    def _run_gateway_test(self, role: str) -> None:
+        if self._gateway_test_running[role]:
             return
+        status = self.sub_status_var if role == "scanner" else self.prime_status_var
+        label = self.lbl_sub_test_result if role == "scanner" else self.lbl_prime_test_result
+        button = self.btn_test_sub if role == "scanner" else self.btn_test_prime
+        try:
+            form = self._gateway_form_values()
+            GatewaySettingsController.validate(form)
+        except Exception as exc:
+            status.set(f"✗ Cấu hình không hợp lệ: {str(exc)[:160]}")
+            label.config(foreground="#DC2626")
+            return
+        self._gateway_test_running[role] = True
+        button.config(state="disabled")
+        status.set("Đang kiểm tra kết nối…")
+        label.config(foreground="#2563EB")
+        results: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
 
-        self.sub_status_var.set(f"Đang kiểm tra kết nối Sub — {model}…")
-        self.lbl_sub_test_result.config(foreground="#2563EB")
+        def _poll() -> None:
+            try:
+                result = results.get_nowait()
+            except queue.Empty:
+                if self.winfo_exists():
+                    self.after(25, _poll)
+                return
+            self._gateway_test_running[role] = False
+            button.config(state="normal")
+            status.set(("✓ " if result["ok"] else "✗ ") + result["message"])
+            label.config(foreground="#16A34A" if result["ok"] else "#DC2626")
 
         def _work() -> None:
-            try:
-                validate_url_no_credentials(endpoint, "Gateway Endpoint")
-                client = GatewayClient(base_url=endpoint, api_key=api_key or None, timeout=8.0)
-                # Transitional: provider-neutral availability check, no video assumption
-                client.validate_model_availability(model)
-                self.after(0, lambda: (
-                    self.sub_status_var.set(f"✓ Sub model hoạt động — {model} sẵn sàng."),
-                    self.lbl_sub_test_result.config(foreground="#16A34A"),
-                ))
-            except Exception as exc:
-                self.after(0, lambda e=exc: (
-                    self.sub_status_var.set(f"✗ Kết nối Sub thất bại: {str(e)[:90]}"),
-                    self.lbl_sub_test_result.config(foreground="#DC2626"),
-                ))
-
+            result = self.gateway_controller.test(form, role, masked_placeholder=MASKED_SECRET_PLACEHOLDER)
+            results.put(result)
+        self.after(25, _poll)
         threading.Thread(target=_work, daemon=True).start()
+
+    def _test_sub_connection(self) -> None:
+        self._run_gateway_test("scanner")
 
     def _test_prime_connection(self) -> None:
-        """Test Prime model connection using provider-neutral model availability check (transitional)."""
-        endpoint = self.var_gw_endpoint.get().strip()
-        model = self.var_gw_prime_model.get().strip()
-        key_input = self.var_gw_key.get()
-        api_key = self.secret_store.get_secret("gateway_api_key") if key_input == MASKED_SECRET_PLACEHOLDER else key_input
-
-        if not endpoint or not model:
-            messagebox.showwarning("AI Gateway", "Endpoint và Prime model không được để trống.", parent=self)
-            return
-
-        self.prime_status_var.set(f"Đang kiểm tra kết nối Prime — {model}…")
-        self.lbl_prime_test_result.config(foreground="#2563EB")
-
-        def _work() -> None:
-            try:
-                validate_url_no_credentials(endpoint, "Gateway Endpoint")
-                client = GatewayClient(base_url=endpoint, api_key=api_key or None, timeout=8.0)
-                # Transitional: provider-neutral availability check, no video assumption
-                client.validate_model_availability(model)
-                self.after(0, lambda: (
-                    self.prime_status_var.set(f"✓ Prime model hoạt động — {model} sẵn sàng."),
-                    self.lbl_prime_test_result.config(foreground="#16A34A"),
-                ))
-            except Exception as exc:
-                self.after(0, lambda e=exc: (
-                    self.prime_status_var.set(f"✗ Kết nối Prime thất bại: {str(e)[:90]}"),
-                    self.lbl_prime_test_result.config(foreground="#DC2626"),
-                ))
-
-        threading.Thread(target=_work, daemon=True).start()
+        self._run_gateway_test("finalizer")
 
     def _test_gateway_connection(self) -> None:
         self._test_sub_connection()
@@ -1369,6 +1372,8 @@ class SettingsDialog(tk.Toplevel):
 
             vs_local = validate_url_no_credentials(self.var_voice_local.get(), "VoiceStudio Local URL")
             vs_remote = validate_url_no_credentials(self.var_voice_remote.get(), "VoiceStudio Remote URL")
+            gateway_form = self._gateway_form_values()
+            GatewaySettingsController.validate(gateway_form)
 
             # 2. Validate Numeric ranges
             orig_db = float(self.var_orig_db.get())
@@ -1401,24 +1406,6 @@ class SettingsDialog(tk.Toplevel):
             self.settings.content_type = self.content_type_var.get()
             self.settings.source_rights_status = self.rights_var.get()
             self.settings.prompt = self.txt_prompt.get("1.0", "end-1c")
-
-            self.settings.gateway_endpoint = gw_url
-            self.settings.gateway_sub_model = self.var_gw_sub_model.get().strip()
-            self.settings.gateway_sub_reasoning = self.var_gw_sub_reasoning.get().strip()
-            # Phase 4 backend adaptation: preserve the current UI while saving the
-            # literal provider-neutral route into the factual Scanner fields.
-            self.settings.scanner_model = self.settings.gateway_sub_model
-            self.settings.scanner_reasoning = self.settings.gateway_sub_reasoning
-            self.settings.vision_model = self.settings.gateway_sub_model
-            self.settings.vision_reasoning = self.settings.gateway_sub_reasoning
-            self.settings.gateway_prime_model = self.var_gw_prime_model.get().strip()
-            self.settings.gateway_prime_reasoning = self.var_gw_prime_reasoning.get().strip()
-            self.settings.planner_model = self.settings.gateway_prime_model
-            self.settings.planner_reasoning = self.settings.gateway_prime_reasoning
-            self.settings.writer_model = self.settings.gateway_prime_model
-            self.settings.writer_reasoning = self.settings.gateway_prime_reasoning
-            self.settings.gateway_model = self.settings.gateway_sub_model
-            self.settings.gateway_thinking = bool(self.settings.gateway_sub_reasoning or self.settings.gateway_prime_reasoning)
 
             self.settings.voice_mode = self.var_voice_mode.get().strip()
             self.settings.voice_local_url = vs_local
@@ -1455,16 +1442,12 @@ class SettingsDialog(tk.Toplevel):
 
             self.settings.update_repo = self.var_update_repo.get().strip()
 
-            # 4. Save AppSettings to settings.json
-            self.settings_manager.save(self.settings)
+            # 4. Atomically persist non-secret Gateway settings and secure key.
+            self.settings = self.gateway_controller.save(
+                self.settings, gateway_form, masked_placeholder=MASKED_SECRET_PLACEHOLDER
+            )
 
-            # 5. Save Secrets exclusively to DPAPISecretStore
-            gw_key_input = self.var_gw_key.get()
-            if gw_key_input and gw_key_input != MASKED_SECRET_PLACEHOLDER:
-                self.secret_store.set_secret("gateway_api_key", gw_key_input.strip())
-            elif not gw_key_input and self._had_gw_key:
-                self.secret_store.delete_secret("gateway_api_key")
-
+            # 5. Save Voice secret exclusively to DPAPISecretStore.
             vs_key_input = self.var_voice_key.get()
             if vs_key_input and vs_key_input != MASKED_SECRET_PLACEHOLDER:
                 self.secret_store.set_secret("voice_remote_api_key", vs_key_input.strip())
@@ -1478,7 +1461,11 @@ class SettingsDialog(tk.Toplevel):
             self.after(400, self.destroy)
 
         except Exception as e:
-            messagebox.showerror("Lỗi xác thực cài đặt", str(e), parent=self)
+            safe_error = sanitize_message(
+                str(e),
+                [self.var_gw_key.get(), self.var_voice_key.get()],
+            )
+            messagebox.showerror("Lỗi xác thực cài đặt", safe_error, parent=self)
 
     def _on_close(self) -> None:
         self.destroy()

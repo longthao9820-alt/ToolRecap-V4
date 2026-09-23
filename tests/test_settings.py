@@ -17,7 +17,7 @@ def test_settings_defaults():
     - GPU: True (GPU on)
     - Voice: alloy, language en-US, style configurable ("")
     - VoiceStudio: mode auto, local http://127.0.0.1:3900, remote https://desktop-t5c9b90.tail7b66e0.ts.net:8443
-    - Gateway: endpoint http://127.0.0.1:20128, model ag/gemini-3.8-flash
+    - Gateway: endpoint http://127.0.0.1:20128, provider-neutral model IDs empty
     - Notifications: all ON
     """
     s = AppSettings()
@@ -46,13 +46,13 @@ def test_settings_defaults():
     assert s.voice_local_url == "http://127.0.0.1:3900"
     assert s.voice_remote_url == ""
 
-    # Gateway (Dual Sub/Prime defaults)
+    # Gateway fresh install is provider-neutral and requires model configuration.
     assert s.gateway_endpoint == "http://127.0.0.1:20128"
-    assert s.gateway_sub_model == "sub"
+    assert s.gateway_sub_model == ""
     assert s.gateway_sub_reasoning == ""
-    assert s.gateway_prime_model == "prime"
+    assert s.gateway_prime_model == ""
     assert s.gateway_prime_reasoning == ""
-    assert s.gateway_model == "sub"
+    assert s.gateway_model == ""
 
     # Notifications defaults ON
     assert s.notify_complete is True

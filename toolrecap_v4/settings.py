@@ -6,22 +6,112 @@ Defaults match the specified requirements:
 - GPU: True (GPU on).
 - Voice: alloy, language en-US, style configurable.
 - VoiceStudio: mode auto, local http://127.0.0.1:3900, remote https://desktop-t5c9b90.tail7b66e0.ts.net:8443.
-- AI Gateway: endpoint http://127.0.0.1:20128, model ag/gemini-3.8-flash.
+- AI Gateway: endpoint http://127.0.0.1:20128; provider-neutral model IDs default empty.
 - Notifications: all defaults ON.
 - Secrets: strictly separated; never stored in settings JSON.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from toolrecap_v4.persistence import ProjectPersistence, get_storage_root
 
+REASONING_VALUES = ("", "low", "medium", "high")
+
+
+@dataclass(frozen=True)
+class GatewayFormValues:
+    endpoint: str
+    api_key: str
+    scanner_model: str
+    scanner_reasoning: str
+    scanner_parallelism: int
+    scanner_chunk_duration_ms: int
+    vision_model: str
+    vision_reasoning: str
+    finalizer_model: str
+    finalizer_reasoning: str
+
+
+class GatewaySettingsController:
+    """UI-independent validation/save/diagnostic layer for the Gateway pane."""
+
+    def __init__(self, settings_manager: SettingsManager, secret_store: Any, gateway_factory: Any = None) -> None:
+        self.settings_manager = settings_manager
+        self.secret_store = secret_store
+        self.gateway_factory = gateway_factory
+
+    @staticmethod
+    def validate(form: GatewayFormValues) -> GatewayFormValues:
+        from urllib.parse import urlparse
+        endpoint = form.endpoint.strip()
+        parsed = urlparse(endpoint)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password:
+            raise ValueError("Gateway Endpoint must be a valid HTTP(S) URL without embedded credentials.")
+        if form.scanner_reasoning not in REASONING_VALUES or form.vision_reasoning not in REASONING_VALUES or form.finalizer_reasoning not in REASONING_VALUES:
+            raise ValueError("Unsupported reasoning value.")
+        if type(form.scanner_parallelism) is not int or not 1 <= form.scanner_parallelism <= 32:
+            raise ValueError("Scanner parallelism must be an integer from 1 to 32.")
+        if type(form.scanner_chunk_duration_ms) is not int or not 1_000 <= form.scanner_chunk_duration_ms <= 3_600_000:
+            raise ValueError("Scanner chunk duration must be 1,000–3,600,000 ms.")
+        return replace(form, endpoint=endpoint, scanner_model=form.scanner_model.strip(), vision_model=form.vision_model.strip(), finalizer_model=form.finalizer_model.strip())
+
+    def save(self, base: AppSettings, form: GatewayFormValues, *, masked_placeholder: str) -> AppSettings:
+        valid = self.validate(form)
+        updated = replace(base)
+        updated.gateway_endpoint = valid.endpoint
+        updated.scanner_model = updated.gateway_sub_model = updated.gateway_model = valid.scanner_model
+        updated.scanner_reasoning = updated.gateway_sub_reasoning = valid.scanner_reasoning
+        updated.scanner_parallelism = valid.scanner_parallelism
+        updated.scanner_chunk_duration_ms = valid.scanner_chunk_duration_ms
+        updated.vision_model = valid.vision_model
+        updated.vision_reasoning = valid.vision_reasoning
+        # Blank Finalizer on a legacy split configuration means "preserve".
+        # A non-empty explicit value is the only operation that unifies stages.
+        if valid.finalizer_model:
+            updated.apply_unified_finalizer(valid.finalizer_model, valid.finalizer_reasoning)
+        updated.gateway_thinking = bool(valid.scanner_reasoning or valid.finalizer_reasoning)
+        previous = self.secret_store.get_secret("gateway_api_key")
+        secret_changed = valid.api_key != masked_placeholder
+        try:
+            if secret_changed:
+                if valid.api_key:
+                    self.secret_store.set_secret("gateway_api_key", valid.api_key.strip())
+                else:
+                    self.secret_store.delete_secret("gateway_api_key")
+            self.settings_manager.save(updated)
+        except Exception:
+            if secret_changed:
+                if previous is None:
+                    self.secret_store.delete_secret("gateway_api_key")
+                else:
+                    self.secret_store.set_secret("gateway_api_key", previous)
+            raise
+        return updated
+
+    def test(self, form: GatewayFormValues, role: str, *, masked_placeholder: str) -> dict[str, Any]:
+        from toolrecap_v4.gateway import GatewayClient, sanitize_message
+        valid = self.validate(form)
+        model = valid.scanner_model if role == "scanner" else valid.finalizer_model
+        if not model:
+            return {"ok": False, "role": role, "model": "", "message": f"{role.title()} Model is not configured"}
+        key = self.secret_store.get_secret("gateway_api_key") if valid.api_key == masked_placeholder else valid.api_key
+        factory = self.gateway_factory or GatewayClient
+        try:
+            client = factory(base_url=valid.endpoint, api_key=key or None, timeout=8.0, max_retries=0)
+            client.validate_model_availability(model)
+            return {"ok": True, "role": role, "model": model, "message": "Connection successful"}
+        except Exception as exc:
+            safe = sanitize_message(str(exc), [key])[:300]
+            return {"ok": False, "role": role, "model": model, "message": safe}
+
 
 @dataclass
 class AppSettings:
+    settings_schema_version: int = 10
     # Audio mix
     original_audio_db: float = 0.0
     commentary_audio_db: float = 0.0
@@ -53,11 +143,11 @@ class AppSettings:
 
     # AI Gateway (Dual-Stage: Sub for video analysis, Prime for synthesis)
     gateway_endpoint: str = "http://127.0.0.1:20128"
-    gateway_sub_model: str = "sub"
+    gateway_sub_model: str = ""
     gateway_sub_reasoning: str = ""
-    gateway_prime_model: str = "prime"
+    gateway_prime_model: str = ""
     gateway_prime_reasoning: str = ""
-    gateway_model: str = "sub"
+    gateway_model: str = ""
     gateway_thinking: bool = False
 
     # Phase 4 factual Scanner. Empty on a fresh install until explicitly configured.
@@ -91,6 +181,11 @@ class AppSettings:
     writer_max_request_bytes: int | None = None
     writer_max_response_bytes: int = 10 * 1024 * 1024
     writer_repair_attempts: int = 2
+
+    # Canonical Phase 10 user-facing creative-stage setting. Compatibility
+    # stage values remain persisted independently until explicit unified Save.
+    finalizer_model: str = ""
+    finalizer_reasoning: str = ""
 
     # Notifications (all defaults ON)
     notify_complete: bool = True
@@ -149,6 +244,25 @@ class AppSettings:
         """Convert settings to dictionary."""
         return asdict(self)
 
+    def finalizer_ui_values(self) -> tuple[str, str, bool]:
+        """Return common creative settings, without mutating differing legacy stages."""
+        if self.finalizer_model:
+            return self.finalizer_model, self.finalizer_reasoning, True
+        models = {v for v in (self.planner_model, self.writer_model, self.gateway_prime_model) if v}
+        reasons = {v for v in (self.planner_reasoning, self.writer_reasoning, self.gateway_prime_reasoning) if v}
+        return (next(iter(models)) if len(models) == 1 else "", next(iter(reasons)) if len(reasons) == 1 else "", len(models) <= 1 and len(reasons) <= 1)
+
+    def apply_unified_finalizer(self, model: str, reasoning: str) -> None:
+        """Explicit Save mapping for all Phase 6-9 creative AI stages."""
+        self.finalizer_model = model
+        self.finalizer_reasoning = reasoning
+        self.gateway_prime_model = model
+        self.gateway_prime_reasoning = reasoning
+        self.planner_model = model
+        self.planner_reasoning = reasoning
+        self.writer_model = model
+        self.writer_reasoning = reasoning
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> AppSettings:
         """Create AppSettings from dict, safely migrating legacy gateway_model and thinking if needed."""
@@ -169,13 +283,17 @@ class AppSettings:
             data_copy["writer_model"] = str(data_copy.get("planner_model") or data_copy.get("gateway_prime_model") or "")
         if "writer_reasoning" not in data_copy:
             data_copy["writer_reasoning"] = str(data_copy.get("planner_reasoning") or data_copy.get("gateway_prime_reasoning") or "")
+        if "finalizer_model" not in data_copy:
+            models = {str(data_copy.get(k) or "") for k in ("planner_model", "writer_model", "gateway_prime_model")} - {""}
+            data_copy["finalizer_model"] = next(iter(models)) if len(models) == 1 else ""
+        if "finalizer_reasoning" not in data_copy:
+            reasons = {str(data_copy.get(k) or "") for k in ("planner_reasoning", "writer_reasoning", "gateway_prime_reasoning")} - {""}
+            data_copy["finalizer_reasoning"] = next(iter(reasons)) if len(reasons) == 1 else ""
         # Migrate legacy single gateway_model to dual sub/prime defaults
         if "gateway_model" in data_copy and "gateway_sub_model" not in data_copy:
             old_model = data_copy.get("gateway_model")
             if old_model:
                 data_copy["gateway_sub_model"] = old_model
-            if "gateway_prime_model" not in data_copy:
-                data_copy["gateway_prime_model"] = "prime"
         if "gateway_sub_model" in data_copy and "gateway_model" not in data_copy:
             data_copy["gateway_model"] = data_copy["gateway_sub_model"]
         if "gateway_thinking" in data_copy:
@@ -210,4 +328,10 @@ class SettingsManager:
 
     def save(self, settings: AppSettings) -> Path:
         """Persist settings to LOCALAPPDATA atomically."""
-        return self.persistence.save_settings(settings.to_dict())
+        merged: Dict[str, Any] = {}
+        try:
+            merged.update(self.persistence.load_settings())
+        except Exception:
+            pass
+        merged.update(settings.to_dict())
+        return self.persistence.save_settings(merged)
