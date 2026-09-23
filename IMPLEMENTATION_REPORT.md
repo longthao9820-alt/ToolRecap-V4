@@ -279,4 +279,4 @@ All validation suites executed and passed cleanly:
 - **Output Writers**: IMPLEMENTED in Phase 8 as independent response-capture jobs.
 - **Executable Packaging**: Portable binary packaging via `build_portable.py` / PyInstaller was not run; no `dist/ToolRecapV4.exe` exists in this phase.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.
-- **Git state**: Phase 1–10 history is preserved. Phase 11 implementation is `b429cabc7560415ace2593686bd79092b0b5350b` (`feat: connect final json to voice and render`); closure corrections are committed separately. No remote or push is configured.
+- **Git state**: Phase 1–10 history is preserved. Phase 11 implementation is `b429cabc7560415ace2593686bd79092b0b5350b` (`feat: connect final json to voice and render`) and closure is `b77547a5981eeaf1323666c0ef62f7f24181e4c2` (`fix: close Phase 11 downstream gaps`). No remote or push is configured.
