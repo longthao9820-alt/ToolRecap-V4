@@ -33,28 +33,30 @@ class FinalizationService:
             if a is None:raise WriterValidationError("Missing/corrupt Phase 8 Writer artifact",output_id=job.output_id,issue_codes=("WRITER_ARTIFACT_MISSING",))
             artifacts.append(a)
         deps={"project_id":project_id,"plan_hash":plan.plan_hash,"writer_hashes":[a.response_hash for a in artifacts],"validator":VALIDATOR_VERSION,"mapping":MAPPING_VERSION,"schema":"3.0","repair_model":self.config.repair_model,"repair_reasoning":self.config.repair_reasoning,"repair_protocol":REPAIR_PROTOCOL_VERSION}
-        revision=f"final-{_digest(deps)[:24]}";base=self.root/"projects"/project_id/"finalization"/revision;final_path=base/"final.json";manifest=base/"manifest.json"
-        if final_path.is_file() and manifest.is_file():
+        dependency_digest=_digest(deps);root=self.root/"projects"/project_id/"finalization";pointer=root/f"active-{dependency_digest[:24]}.json"
+        if pointer.is_file():
             try:
-                data=json.loads(final_path.read_text());m=json.loads(manifest.read_text());validate_project(data,{e.source_basename or e.source_path.name:e.duration_ms for e in episodes})
-                if m.get("status")=="COMPLETE" and m.get("dependency_digest")==_digest(deps) and m.get("artifact_hash")==_digest(data):
+                active=json.loads(pointer.read_text());revision=active["revision"];base=root/revision;final_path=base/"final.json";manifest=base/"manifest.json";data=json.loads(final_path.read_text());m=json.loads(manifest.read_text());validate_project(data,{e.source_basename or e.source_path.name:e.duration_ms for e in episodes})
+                if m.get("status")=="COMPLETE" and m.get("dependency_digest")==dependency_digest and m.get("artifact_hash")==_digest(data) and m.get("revision")==revision and active.get("artifact_hash")==m.get("artifact_hash"):
                     ProjectPersistence(self.root).save_final_json(project_id,data);return FinalizationResult(data,revision,m["artifact_hash"],tuple(),tuple(),True)
             except Exception:pass
+        work_base=root/f"s-{dependency_digest[:12]}"
         validator=OutputValidator(project_id=project_id,plan=plan,episodes=episodes,visual=visual,evidence_store=EvidenceStore(self.root,project_id));results=[];repaired=[]
         for job,artifact in zip(jobs,artifacts):
             if cancellation_token:cancellation_token.check_cancelled()
             result=validator.validate(job,artifact.raw_response)
-            if result.state!="VALID":result=self._repair(job,artifact,result,validator,base,cancellation_token);repaired.append(job.output_id)
-            results.append(result);self._save_validated(base,artifact,result)
+            if result.state!="VALID":result=self._repair(job,artifact,result,validator,work_base,cancellation_token);repaired.append(job.output_id)
+            results.append(result);self._save_validated(work_base,artifact,result)
         final=map_final_json(project_id=project_id,project_name=project_name,episodes=episodes,plan=plan,validated=results)
         try:validate_project(final,{e.source_basename or e.source_path.name:e.duration_ms for e in episodes},cancellation_token)
         except Exception as exc:raise FinalJsonValidationError(f"Merged schema 3.0 Final JSON is invalid: {exc}") from exc
         if cancellation_token:cancellation_token.check_cancelled()
-        base.mkdir(parents=True,exist_ok=True);atomic_write_json(manifest,{"status":"BUILDING","dependency_digest":_digest(deps)});atomic_write_json(final_path,final);artifact_hash=_digest(final);atomic_write_json(manifest,{"status":"COMPLETE","dependency_digest":_digest(deps),"artifact_hash":artifact_hash,"revision":revision,"validated_output_ids":[r.output_id for r in results]})
+        final_dependencies={**deps,"ordered_validated_output_hashes":[_digest(r.normalized) for r in results]};revision=f"final-{_digest(final_dependencies)[:24]}";base=root/revision;final_path=base/"final.json";manifest=base/"manifest.json"
+        base.mkdir(parents=True,exist_ok=True);atomic_write_json(manifest,{"status":"BUILDING","dependency_digest":dependency_digest});atomic_write_json(final_path,final);artifact_hash=_digest(final);atomic_write_json(manifest,{"status":"COMPLETE","dependency_digest":dependency_digest,"semantic_dependencies":final_dependencies,"artifact_hash":artifact_hash,"revision":revision,"validated_output_ids":[r.output_id for r in results]});atomic_write_json(pointer,{"status":"COMPLETE","dependency_digest":dependency_digest,"revision":revision,"artifact_hash":artifact_hash})
         ProjectPersistence(self.root).save_final_json(project_id,final)
         return FinalizationResult(final,revision,artifact_hash,tuple(results),tuple(repaired),False)
     def _repair(self,job,artifact,validation,validator,base,token):
-        issue_digest=_digest(list(validation.issues));directory=base/"outputs"/job.output_id/"repairs"/issue_digest[:16];directory.mkdir(parents=True,exist_ok=True)
+        issue_digest=_digest(list(validation.issues));directory=base/job.output_id/f"r-{issue_digest[:8]}";directory.mkdir(parents=True,exist_ok=True)
         for attempt in range(1,self.config.repair_attempts+1):
             raw_path=directory/f"attempt-{attempt:02d}.raw.txt";raw=None
             if raw_path.is_file():raw=raw_path.read_text(encoding="utf-8")

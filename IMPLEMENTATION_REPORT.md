@@ -181,8 +181,8 @@ All validation suites executed and passed cleanly:
 - Phase 7 focused coverage: **28 targeted visual request/frame/Vision/cache/plan-lock tests** plus updated workflow assertions.
 - Phase 8 closure full suite: **501 passed in 68.99s**, 0 failures, 0 errors, 0 skipped.
 - Phase 8 closure focused coverage: **20 targeted Writer context/integrity/execution/cache/response-boundary tests** plus updated workflow/bypass assertions.
-- Phase 9 final full suite: **522 passed in 67.03s**, 0 failures, 0 errors, 0 skipped.
-- Phase 9 focused coverage: **21 validation/repair/mapping/reuse tests** plus updated workflow/bypass assertions.
+- Phase 9 closure full suite: **526 passed in 67.39s**, 0 failures, 0 errors, 0 skipped.
+- Phase 9 focused coverage: **25 validation/repair/mapping/revision/zero-output tests** plus updated workflow/bypass assertions.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
   - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
