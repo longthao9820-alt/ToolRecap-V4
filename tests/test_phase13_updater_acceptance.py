@@ -11,8 +11,8 @@ import zipfile
 import httpx
 import pytest
 
-from toolrecap_v4.errors import ChecksumMismatchError, PackageValidationError, UpdateInProgressError
-from toolrecap_v4.updater import UpdateCheckResult, UpdateManager, validate_package
+from toolrecap_v4.errors import ChecksumMismatchError, MaliciousArchiveError, PackageValidationError, UpdateCheckError, UpdateInProgressError
+from toolrecap_v4.updater import UpdateCheckResult, UpdateManager, safe_extract_zip, validate_package
 
 
 def _package_files(version: str = "4.1.0") -> dict[str, bytes]:
@@ -122,3 +122,34 @@ def test_package_audit_rejects_user_state_and_requires_runtime_layout(tmp_path):
     forbidden.write_bytes(b"must-not-ship")
     with pytest.raises(PackageValidationError, match="forbidden"):
         validate_package(package)
+
+
+@pytest.mark.parametrize("entry", [
+    "..\\evil.exe", "../evil.exe", "nested/..\\..\\evil.exe",
+    "C:\\outside\\evil.exe", "/absolute/evil.exe",
+])
+def test_windows_archive_traversal_variants_are_rejected(tmp_path, entry):
+    archive_path = tmp_path / "bad.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(entry, b"malicious")
+    target = tmp_path / "staging"
+    with pytest.raises(MaliciousArchiveError, match="Path traversal"):
+        safe_extract_zip(archive_path, target)
+    assert not (tmp_path / "evil.exe").exists()
+
+
+def test_incomplete_download_cleans_archive_and_stage(tmp_path):
+    payload = _zip_bytes(_package_files())
+    digest = hashlib.sha256(payload).hexdigest()
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("sha256.txt"):
+            return httpx.Response(200, text=f"{digest}  package.zip\n")
+        return httpx.Response(200, content=payload, headers={"content-length": str(len(payload) + 1)})
+    manager = UpdateManager(
+        storage_root=tmp_path / "state", client=httpx.Client(transport=httpx.MockTransport(handler)),
+        current_version="4.0.0",
+    )
+    with pytest.raises((UpdateCheckError, httpx.RemoteProtocolError)):
+        manager.download_and_stage(_result())
+    assert not any(manager.staging_dir.glob("*.zip"))
+    assert not (manager.staging_dir / "v4.1.0").exists()

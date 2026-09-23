@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import sys
 import zipfile
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 
 from toolrecap_v4.__version__ import __version__
@@ -248,6 +248,28 @@ def test_active_guard_prevents_concurrent_runs(tmp_path: Path):
         with pytest.raises(UpdateInProgressError, match="already in progress"):
             with mgr.active_guard():
                 pass
+
+
+def test_settings_update_manager_observes_active_workflow(tmp_path: Path):
+    """The real Settings dialog connects the project worker to the staging guard."""
+    persistence = ProjectPersistence(storage_root=tmp_path)
+    app = MainWindow(persistence=persistence)
+    try:
+        dialog = SettingsDialog(app, persistence=persistence)
+        try:
+            assert dialog.update_manager.activity_probe is not None
+            with patch.object(type(app.worker), "is_running", new_callable=PropertyMock, return_value=True):
+                assert dialog.update_manager.activity_probe() is True
+                with pytest.raises(UpdateInProgressError, match="workflow is active"):
+                    dialog.update_manager.download_and_stage(UpdateCheckResult(
+                        status="update_available", current_version="4.0.0", latest_version="4.1.0",
+                        zip_url="https://example.test/package.zip",
+                        sha256_url="https://example.test/package.sha256.txt",
+                    ))
+        finally:
+            dialog.destroy()
+    finally:
+        app.destroy()
 
 
 # =============================================================================

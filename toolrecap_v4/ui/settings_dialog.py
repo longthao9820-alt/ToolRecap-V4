@@ -257,7 +257,10 @@ class SettingsDialog(tk.Toplevel):
 
         # Updater variables
         self.var_update_repo = tk.StringVar(value=val.update_repo)
-        self.update_manager = UpdateManager(storage_root=self.persistence.root)
+        self.update_manager = UpdateManager(
+            storage_root=self.persistence.root,
+            activity_probe=lambda: bool(getattr(getattr(self.parent, "worker", None), "is_running", False)),
+        )
         self._last_check_result: Optional[UpdateCheckResult] = None
         self._staged_update_path: Optional[Path] = None
 
