@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Callable
 import uuid
 
 from toolrecap_v4.analysis.evidence_store import EvidenceStore
@@ -21,6 +21,7 @@ from toolrecap_v4.cancellation import CancellationToken
 from toolrecap_v4.errors import FinalPlannerValidationError, SeasonPlanLockError
 from toolrecap_v4.gateway import GatewayClient
 from toolrecap_v4.persistence import atomic_write_json
+from toolrecap_v4.progress import ActivityState, WorkflowStage, safe_emit
 
 FINAL_PLAN_PROTOCOL = "final-season-plan-draft-v1"
 SEASON_PLAN_VERSION = "season-plan-v1"
@@ -166,6 +167,7 @@ class SeasonPlanService:
     def __init__(
         self, gateway: GatewayClient, root: Path | str, model: str, reasoning: str = "",
         *, repair_attempts: int = 0, max_request_bytes: int | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         if repair_attempts < 0 or repair_attempts > 3:
             raise ValueError("Final Planner repair attempts must be between 0 and 3.")
@@ -175,6 +177,10 @@ class SeasonPlanService:
         self.reasoning = reasoning
         self.repair_attempts = repair_attempts
         self.max_request_bytes = max_request_bytes
+        self.progress_callback = progress_callback
+
+    def _emit(self, **payload: Any) -> None:
+        safe_emit(self.progress_callback, stage=WorkflowStage.FINAL_PLAN.value, **payload)
 
     def _send(self, prompt: str, *, phase: str, cancellation_token: CancellationToken | None):
         measured = measure_text_request_bytes(
@@ -264,8 +270,24 @@ class SeasonPlanService:
                     "invalid_response": previous_raw,
                 }, ensure_ascii=False, separators=(",", ":"))
                 phase = "final_planner_refinement_repair"
+            self._emit(
+                state=ActivityState.REPAIRING.value if attempt else ActivityState.WAITING_FOR_AI.value,
+                activity_text=(
+                    f"Repairing Final Planner response — attempt {attempt} / {self.repair_attempts}"
+                    if attempt else "Waiting for Final Planner Refinement response..."
+                ),
+                current_item="final-planner-refinement", waiting_for="AI",
+                retry_attempt=attempt if attempt else None,
+                retry_limit=self.repair_attempts if attempt else None,
+                item_event="start", item_key="final-planner-refinement",
+            )
             result, measured = self._send(current_prompt, phase=phase, cancellation_token=cancellation_token)
             raw = result.raw_response
+            self._emit(
+                state=ActivityState.LOCAL_PROCESSING.value,
+                activity_text="Final Planner response received; validating Season Plan...",
+                current_item="final-planner-refinement",
+            )
             self._save_raw(base, attempt, raw, dependency_digest=dependency_digest,
                            request_bytes=measured, metadata=result.metadata or {})
             try:
@@ -303,6 +325,11 @@ class SeasonPlanService:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 if (manifest.get("status") == "LOCKED" and manifest.get("dependency_digest") == dependency_digest
                     and _digest(plan_data) == manifest.get("artifact_hash")):
+                    self._emit(
+                        state=ActivityState.RUNNING.value,
+                        activity_text="Reused locked Season Plan checkpoint.",
+                        current_item="season-plan", reused=1, stage_status="complete",
+                    )
                     return SeasonPlanResult(self._from_dict(plan_data), plan_path, True)
             except (OSError, ValueError, KeyError, TypeError):
                 pass
@@ -351,6 +378,13 @@ class SeasonPlanService:
             "status": "LOCKED", "dependency_digest": dependency_digest,
             "artifact_hash": _digest(plan.to_dict()), "plan_hash": plan.plan_hash,
         })
+        self._emit(
+            state=ActivityState.LOCAL_PROCESSING.value,
+            activity_text=f"Season Plan locked with {len(plan.outputs)} outputs.",
+            current_item="season-plan", completed=len(plan.outputs), total=len(plan.outputs),
+            unit="outputs", stage_status="complete", item_event="complete",
+            item_key="final-planner-refinement",
+        )
         return SeasonPlanResult(plan, plan_path, False)
 
     def _validate(

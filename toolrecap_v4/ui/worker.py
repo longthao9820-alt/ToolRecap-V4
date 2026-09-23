@@ -44,6 +44,7 @@ from toolrecap_v4.workflow import (
     ProjectWorkflow,
     WorkflowCallbacks,
 )
+from toolrecap_v4.progress import ActivityState, WorkflowStage
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +258,7 @@ class WorkflowWorker:
         self._cancellation_token: Optional[CancellationToken] = None
         self._lock = threading.Lock()
         self._is_running = False
+        self._active_project_id: Optional[str] = None
 
     @property
     def is_running(self) -> bool:
@@ -270,6 +272,11 @@ class WorkflowWorker:
             if self._cancellation_token:
                 self._cancellation_token.cancel()
                 self._put_message("log", "Đang gửi yêu cầu dừng tới tiến trình...")
+                self._put_message("activity_patch", {
+                    "state": ActivityState.CANCELLING.value,
+                    "activity_text": "Cancelling safely at the next checkpoint...",
+                    "active": True,
+                })
 
     def _put_message(self, kind: str, data: Any = None) -> None:
         """Thread-safely put a message into the queue."""
@@ -315,6 +322,7 @@ class WorkflowWorker:
             if self._is_running:
                 raise RuntimeError("Một tác vụ đang được thực hiện. Vui lòng chờ hoặc bấm Dừng trước khi bắt đầu tác vụ mới.")
             self._is_running = True
+            self._active_project_id = project_id
             token = CancellationToken()
             self._cancellation_token = token
 
@@ -322,6 +330,15 @@ class WorkflowWorker:
 
         def _worker_target() -> None:
             try:
+                self._put_message("activity", {
+                    "project_id": project_id, "state": ActivityState.STARTING.value,
+                    "stage": WorkflowStage.PREPARATION.value,
+                    "stage_label": "Preparing Episodes", "activity_text": "Creating project and verifying sources...",
+                    "active": True, "completed": None, "total": None, "percent": None,
+                    "session_elapsed_seconds": 0.0, "project_elapsed_seconds": 0.0,
+                    "stage_elapsed_seconds": 0.0, "estimated_remaining_seconds": None,
+                    "recent_activity": [], "last_activity_at": None,
+                })
                 self._put_message("log", f"Bắt đầu khởi tạo dự án '{project_name}' ({project_id})...")
                 wf = self._create_workflow(cfg)
 
@@ -366,6 +383,7 @@ class WorkflowWorker:
             finally:
                 with self._lock:
                     self._is_running = False
+                    self._active_project_id = None
 
         self._thread = threading.Thread(target=_worker_target, daemon=True, name="WorkflowWorkerThread")
         self._thread.start()
@@ -381,6 +399,7 @@ class WorkflowWorker:
             if self._is_running:
                 raise RuntimeError("Một tác vụ đang được thực hiện. Vui lòng chờ hoặc bấm Dừng.")
             self._is_running = True
+            self._active_project_id = project_id
             token = CancellationToken()
             self._cancellation_token = token
 
@@ -388,6 +407,11 @@ class WorkflowWorker:
 
         def _worker_target() -> None:
             try:
+                self._put_message("activity_patch", {
+                    "project_id": project_id, "state": ActivityState.RESUMING.value,
+                    "activity_text": "Reconstructing saved checkpoints...", "active": True,
+                    "session_elapsed_seconds": 0.0,
+                })
                 self._put_message("log", f"Tiếp tục thực hiện dự án '{project_id}'...")
                 wf = self._create_workflow(cfg)
                 callbacks = self._build_callbacks()
@@ -415,6 +439,7 @@ class WorkflowWorker:
             finally:
                 with self._lock:
                     self._is_running = False
+                    self._active_project_id = None
 
         self._thread = threading.Thread(target=_worker_target, daemon=True, name="WorkflowWorkerThread")
         self._thread.start()
@@ -433,6 +458,7 @@ class WorkflowWorker:
             if self._is_running:
                 raise RuntimeError("Một tác vụ đang được thực hiện. Vui lòng chờ hoặc bấm Dừng.")
             self._is_running = True
+            self._active_project_id = project_id
             token = CancellationToken()
             self._cancellation_token = token
 
@@ -440,6 +466,15 @@ class WorkflowWorker:
 
         def _worker_target() -> None:
             try:
+                self._put_message("activity", {
+                    "project_id": project_id, "state": ActivityState.STARTING.value,
+                    "stage": WorkflowStage.FINAL_JSON.value,
+                    "stage_label": "Building Final JSON", "activity_text": "Validating imported Final JSON (zero AI)...",
+                    "active": True, "completed": None, "total": None, "percent": None,
+                    "session_elapsed_seconds": 0.0, "project_elapsed_seconds": 0.0,
+                    "stage_elapsed_seconds": 0.0, "estimated_remaining_seconds": None,
+                    "recent_activity": [], "last_activity_at": None,
+                })
                 self._put_message("log", f"Nhập kịch bản JSON có sẵn cho dự án '{project_name}' (0 yêu cầu AI)...")
                 wf = self._create_workflow(cfg)
 
@@ -482,6 +517,7 @@ class WorkflowWorker:
             finally:
                 with self._lock:
                     self._is_running = False
+                    self._active_project_id = None
 
         self._thread = threading.Thread(target=_worker_target, daemon=True, name="WorkflowWorkerThread")
         self._thread.start()
@@ -532,6 +568,9 @@ class WorkflowWorker:
             clean = format_clean_error(e)
             self._put_message("error", {"message": clean, "raw_response": raw})
 
+        def on_activity(snapshot: Dict[str, Any]) -> None:
+            self._put_message("activity", snapshot)
+
         return WorkflowCallbacks(
             on_status_change=on_status_change,
             on_sub_analysis=on_sub_analysis,
@@ -542,4 +581,5 @@ class WorkflowWorker:
             on_output_failed=on_output_failed,
             on_output_skipped=on_output_skipped,
             on_error=on_error,
+            on_activity=on_activity,
         )

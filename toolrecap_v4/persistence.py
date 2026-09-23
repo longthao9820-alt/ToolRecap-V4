@@ -129,6 +129,11 @@ class ProjectPersistence:
         validate_windows_name(checkpoint_id, "checkpoint_id")
         return self._checkpoint_dir(project_id) / f"{checkpoint_id}.json"
 
+    def _operational_status_path(self, project_id: str) -> Path:
+        """Return the dedicated non-editorial workflow status artifact path."""
+        validate_windows_name(project_id, "project_id")
+        return self.projects_dir / project_id / "operational_status.json"
+
     def save_project(self, project_data: Dict[str, Any]) -> Path:
         """Save project state atomically in LOCALAPPDATA."""
         if "project_id" not in project_data:
@@ -155,6 +160,20 @@ class ProjectPersistence:
         """Load output checkpoint from LOCALAPPDATA."""
         target = self._checkpoint_path(project_id, checkpoint_id)
         return read_json(target)
+
+    def save_operational_status(self, project_id: str, status_data: Dict[str, Any]) -> Path:
+        """Persist workflow observability/timing separately from editorial Final JSON."""
+        target = self._operational_status_path(project_id)
+        atomic_write_json(target, status_data)
+        return target
+
+    def load_operational_status(self, project_id: str) -> Dict[str, Any]:
+        """Load the latest event-based workflow status snapshot."""
+        return read_json(self._operational_status_path(project_id))
+
+    def has_operational_status(self, project_id: str) -> bool:
+        """Return whether a project has V4 operational timing metadata."""
+        return self._operational_status_path(project_id).is_file()
 
     def save_settings(self, settings_data: Dict[str, Any]) -> Path:
         """Save application settings atomically in LOCALAPPDATA."""

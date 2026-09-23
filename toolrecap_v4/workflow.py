@@ -73,6 +73,12 @@ from toolrecap_v4.renderer import (
 from toolrecap_v4.settings import AppSettings, SettingsManager
 from toolrecap_v4.validator import check_for_secrets, validate_project, validate_windows_name
 from toolrecap_v4.voice_studio import VoiceStudioAdapter
+from toolrecap_v4.progress import (
+    ActivityState,
+    ProgressEvent,
+    WorkflowProgressTracker,
+    WorkflowStage,
+)
 
 
 class ProjectStatus(str, enum.Enum):
@@ -133,6 +139,7 @@ class WorkflowCallbacks:
     on_season_plan_ready: Optional[Callable[[str, Dict[str, Any]], None]] = None
     on_writer_drafts_ready: Optional[Callable[[Dict[str, Any]], None]] = None
     on_final_json_ready: Optional[Callable[[Dict[str, Any]], None]] = None
+    on_activity: Optional[Callable[[Dict[str, Any]], None]] = None
 
 
 def resolve_sources(
@@ -385,6 +392,8 @@ class ProjectWorkflow:
         season_plan_service: Optional[SeasonPlanService] = None,
         writer_service: Optional[WriterService] = None,
         finalization_service: Optional[FinalizationService] = None,
+        progress_monotonic: Optional[Callable[[], float]] = None,
+        progress_wall_clock: Optional[Callable[[], float]] = None,
     ) -> None:
         self.persistence = persistence or ProjectPersistence(storage_root=storage_root)
         self.settings_manager = settings_manager or SettingsManager(persistence=self.persistence)
@@ -398,6 +407,8 @@ class ProjectWorkflow:
         self.season_plan_service = season_plan_service
         self.writer_service = writer_service
         self.finalization_service = finalization_service
+        self.progress_monotonic = progress_monotonic
+        self.progress_wall_clock = progress_wall_clock
 
     def create_project(
         self,
@@ -577,6 +588,7 @@ class ProjectWorkflow:
             cancellation_token=cancellation_token,
             callbacks=callbacks,
             source_preparation_pipeline=source_preparation_pipeline,
+            run_mode="start",
         )
 
     def resume_project(
@@ -596,6 +608,7 @@ class ProjectWorkflow:
             cancellation_token=cancellation_token,
             callbacks=callbacks,
             source_preparation_pipeline=source_preparation_pipeline,
+            run_mode="resume",
         )
 
     def retry_project(
@@ -615,6 +628,7 @@ class ProjectWorkflow:
             cancellation_token=cancellation_token,
             callbacks=callbacks,
             source_preparation_pipeline=source_preparation_pipeline,
+            run_mode="retry",
         )
 
     def get_project(self, project_id: str) -> Dict[str, Any]:
@@ -636,6 +650,7 @@ class ProjectWorkflow:
         cancellation_token: Optional[CancellationToken] = None,
         callbacks: Optional[WorkflowCallbacks] = None,
         source_preparation_pipeline: Optional[SourcePreparationPipeline] = None,
+        run_mode: str = "start",
     ) -> Dict[str, Any]:
         """Synchronous execution engine for create/start/resume/retry."""
         validate_windows_name(project_id, "project_id")
@@ -643,6 +658,17 @@ class ProjectWorkflow:
         # Step 1: Load state and reconcile interrupted states
         state = self.persistence.load_project(project_id)
         state = reconcile_project_state(state, self.persistence)
+        tracker_kwargs: Dict[str, Any] = {}
+        if self.progress_monotonic is not None:
+            tracker_kwargs["monotonic"] = self.progress_monotonic
+        if self.progress_wall_clock is not None:
+            tracker_kwargs["wall_clock"] = self.progress_wall_clock
+        tracker = WorkflowProgressTracker(
+            self.persistence, project_id,
+            callback=callbacks.on_activity if callbacks else None,
+            **tracker_kwargs,
+        )
+        tracker.begin(resuming=run_mode in {"resume", "retry"})
 
         # Check if matching final_json exists (Resume/import NEVER Gateway once Final JSON exists)
         final_json = state.get("final_json")
@@ -676,6 +702,13 @@ class ProjectWorkflow:
                     fps_list.sort(key=lambda x: natural_sort_key(x.get("basename", "")))
                     ordered_sources = [{"source_file": f.get("basename"), "fingerprint": f} for f in fps_list]
 
+                tracker.emit(ProgressEvent(
+                    state=ActivityState.LOCAL_PROCESSING.value,
+                    stage=WorkflowStage.PREPARATION.value,
+                    activity_text="Preparing source episodes...",
+                    completed=0, total=len(ordered_sources), unit="episodes",
+                ))
+
                 prep_pipeline = (
                     source_preparation_pipeline
                     or self.source_preparation_pipeline
@@ -689,6 +722,14 @@ class ProjectWorkflow:
                         cancellation_token.check_cancelled()
 
                     episode_id = f"E{i:02d}"
+                    tracker.emit(ProgressEvent(
+                        state=ActivityState.LOCAL_PROCESSING.value,
+                        stage=WorkflowStage.PREPARATION.value,
+                        activity_text="Preparing episode media and transcript...",
+                        episode_id=episode_id, current_item=episode_id,
+                        completed=i - 1, total=len(ordered_sources), unit="episodes",
+                        item_event="start", item_key=episode_id,
+                    ))
                     src_fp = src_entry.get("fingerprint", {})
                     src_file = src_entry.get("source_file") or (src_fp.get("basename") if isinstance(src_fp, dict) else "")
                     src_map_entry = state["source_fingerprints"].get(src_file, {})
@@ -706,6 +747,13 @@ class ProjectWorkflow:
                     def _progress_cb(phase: str, pct: float, msg: str) -> None:
                         if callbacks and callbacks.on_source_preparation_progress:
                             callbacks.on_source_preparation_progress(episode_id, phase, pct, msg)
+                        tracker.emit(ProgressEvent(
+                            state=ActivityState.LOCAL_PROCESSING.value,
+                            stage=WorkflowStage.PREPARATION.value,
+                            activity_text=msg or f"Preparing {episode_id}: {phase}",
+                            episode_id=episode_id, current_item=episode_id,
+                            completed=i - 1, total=len(ordered_sources), unit="episodes",
+                        ))
 
                     try:
                         prepared_ep = prep_pipeline.prepare_episode(
@@ -774,6 +822,14 @@ class ProjectWorkflow:
 
                     if callbacks and callbacks.on_episode_prepared:
                         callbacks.on_episode_prepared(episode_id, ep_summary)
+                    tracker.emit(ProgressEvent(
+                        state=ActivityState.RUNNING.value,
+                        stage=WorkflowStage.PREPARATION.value,
+                        activity_text="Episode preparation checkpoint saved.",
+                        episode_id=episode_id, current_item=episode_id,
+                        completed=i, total=len(ordered_sources), unit="episodes",
+                        item_event="complete", item_key=episode_id,
+                    ))
 
                 # All episodes successfully prepared -> persist manifest and checkpoint
                 manifest_data = {
@@ -789,6 +845,13 @@ class ProjectWorkflow:
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                     "episodes": [ep["episode_id"] for ep in prep_episodes.values()],
                 })
+                tracker.emit(ProgressEvent(
+                    state=ActivityState.LOCAL_PROCESSING.value,
+                    stage=WorkflowStage.PREPARATION.value,
+                    activity_text="All episode preparation checkpoints are complete.",
+                    completed=len(ordered_sources), total=len(ordered_sources),
+                    unit="episodes", stage_status="complete",
+                ))
 
                 # A fresh install requires an explicit provider-neutral Scanner model.
                 scanner = self.scanner_service
@@ -806,7 +869,11 @@ class ProjectWorkflow:
                             ),
                             repair_attempts=cfg.scanner_repair_attempts,
                         ),
+                        progress_callback=tracker.emit_payload,
                     )
+
+                if scanner is not None and hasattr(scanner, "progress_callback"):
+                    scanner.progress_callback = tracker.emit_payload
 
                 if scanner is None:
                     scanner_msg = "Analysis pipeline stopped: source preparation complete (PREPARED); Scanner is unavailable until a Scanner model is configured."
@@ -872,6 +939,11 @@ class ProjectWorkflow:
                     callbacks.on_status_change(ProjectStatus.EVIDENCE_READY.value)
 
                 catalog_service = self.catalog_service or CatalogService(self.persistence.root)
+                tracker.emit(ProgressEvent(
+                    state=ActivityState.LOCAL_PROCESSING.value,
+                    stage=WorkflowStage.CATALOG.value,
+                    activity_text="Building the complete Season Evidence Catalog...",
+                ))
                 try:
                     catalog_result = catalog_service.build_or_load(
                         project_id=project_id,
@@ -919,6 +991,14 @@ class ProjectWorkflow:
                     callbacks.on_catalog_ready(catalog_result.catalog.catalog_hash, catalog_summary)
                 if callbacks and callbacks.on_status_change:
                     callbacks.on_status_change(ProjectStatus.CATALOG_READY.value)
+                tracker.emit(ProgressEvent(
+                    state=ActivityState.LOCAL_PROCESSING.value,
+                    stage=WorkflowStage.CATALOG.value,
+                    activity_text=("Reused Season Catalog checkpoint." if catalog_result.reused else "Season Catalog checkpoint completed."),
+                    completed=len(catalog_result.catalog.items), total=len(catalog_result.catalog.items),
+                    unit="evidence items", reused=len(catalog_result.catalog.items) if catalog_result.reused else 0,
+                    stage_status="complete",
+                ))
 
                 planner_service = self.planner_service
                 if planner_service is None and cfg.planner_model.strip():
@@ -932,7 +1012,10 @@ class ProjectWorkflow:
                             repair_attempts=cfg.planner_repair_attempts,
                             max_request_bytes=cfg.planner_max_request_bytes,
                         ),
+                        progress_callback=tracker.emit_payload,
                     )
+                if planner_service is not None and hasattr(planner_service, "progress_callback"):
+                    planner_service.progress_callback = tracker.emit_payload
                 if planner_service is None:
                     phase6_err = AnalysisPipelineUnavailableError(phase6_msg)
                     if callbacks and callbacks.on_error:
@@ -991,7 +1074,10 @@ class ProjectWorkflow:
                         self.gateway_client, self.persistence.root,
                         VisionConfig(cfg.vision_model, cfg.vision_reasoning, cfg.vision_repair_attempts,
                             FrameExtractionPolicy(cfg.vision_frames_per_range,cfg.vision_frames_per_episode,cfg.vision_hard_frame_cap)),
+                        progress_callback=tracker.emit_payload,
                     )
+                if visual_service is not None and hasattr(visual_service, "progress_callback"):
+                    visual_service.progress_callback = tracker.emit_payload
                 if visual_service is None:
                     phase7_err = AnalysisPipelineUnavailableError(phase7_msg + " Vision model is not configured.")
                     if callbacks and callbacks.on_error: callbacks.on_error(phase7_err,None)
@@ -1002,7 +1088,10 @@ class ProjectWorkflow:
                     self.gateway_client, self.persistence.root, cfg.planner_model,
                     cfg.planner_reasoning, repair_attempts=cfg.planner_repair_attempts,
                     max_request_bytes=cfg.planner_max_request_bytes,
+                    progress_callback=tracker.emit_payload,
                 )
+                if hasattr(plan_service, "progress_callback"):
+                    plan_service.progress_callback = tracker.emit_payload
                 plan_result = plan_service.run(project_id=project_id,raw_recap_prompt=state.get("prompt",""),catalog=catalog_result.catalog,draft=planner_result.draft,visual=visual_result,cancellation_token=cancellation_token)
                 plan_summary={"status":"completed","plan_hash":plan_result.plan.plan_hash,"visual_revision":visual_result.visual_revision,"output_count":len(plan_result.plan.outputs),"season_plan_path":str(plan_result.path),"reused":plan_result.reused,"completed_at":datetime.now(timezone.utc).isoformat()}
                 self.persistence.save_checkpoint(project_id,"season_plan",plan_summary)
@@ -1011,7 +1100,8 @@ class ProjectWorkflow:
                 if callbacks and callbacks.on_season_plan_ready:callbacks.on_season_plan_ready(plan_result.plan.plan_hash,plan_summary)
                 if callbacks and callbacks.on_status_change:callbacks.on_status_change(ProjectStatus.SEASON_PLAN_READY.value)
                 writer_service=self.writer_service
-                if writer_service is None and cfg.writer_model.strip():writer_service=WriterService(self.gateway_client,self.persistence.root,WriterConfig(cfg.writer_model,cfg.writer_reasoning,cfg.writer_parallelism,cfg.writer_max_request_bytes,cfg.writer_max_response_bytes))
+                if writer_service is None and cfg.writer_model.strip():writer_service=WriterService(self.gateway_client,self.persistence.root,WriterConfig(cfg.writer_model,cfg.writer_reasoning,cfg.writer_parallelism,cfg.writer_max_request_bytes,cfg.writer_max_response_bytes),progress_callback=tracker.emit_payload)
+                if writer_service is not None and hasattr(writer_service,"progress_callback"):writer_service.progress_callback=tracker.emit_payload
                 if writer_service is None:
                     phase8_err=AnalysisPipelineUnavailableError(phase8_msg)
                     if callbacks and callbacks.on_error:callbacks.on_error(phase8_err,None)
@@ -1022,13 +1112,23 @@ class ProjectWorkflow:
                 state["status"]=ProjectStatus.WRITER_DRAFTS_READY.value;state["writer_drafts"]=writer_summary;state["error"]=phase9_msg;state.setdefault("timestamps",{})["writer_drafts_ready_at"]=now_w;state["timestamps"]["updated_at"]=now_w;self.persistence.save_project(state)
                 if callbacks and callbacks.on_writer_drafts_ready:callbacks.on_writer_drafts_ready(writer_summary)
                 if callbacks and callbacks.on_status_change:callbacks.on_status_change(ProjectStatus.WRITER_DRAFTS_READY.value)
-                finalizer=self.finalization_service or FinalizationService(self.gateway_client,self.persistence.root,FinalizationConfig(cfg.writer_model,cfg.writer_reasoning,cfg.writer_repair_attempts,cfg.writer_max_request_bytes,cfg.writer_max_response_bytes))
+                finalizer=self.finalization_service or FinalizationService(self.gateway_client,self.persistence.root,FinalizationConfig(cfg.writer_model,cfg.writer_reasoning,cfg.writer_repair_attempts,cfg.writer_max_request_bytes,cfg.writer_max_response_bytes),progress_callback=tracker.emit_payload)
+                if hasattr(finalizer,"progress_callback"):finalizer.progress_callback=tracker.emit_payload
                 finalized=finalizer.run(project_id=project_id,project_name=state["project_name"],raw_prompt=state.get("prompt",""),language=cfg.recap_language,plan=plan_result.plan,episodes=prepared_models,visual=visual_result,cancellation_token=cancellation_token)
                 final_summary={"status":"completed","revision":finalized.revision,"artifact_hash":finalized.artifact_hash,"output_count":len(finalized.final_json["outputs"]),"repaired_output_ids":list(finalized.repaired_output_ids),"reused":finalized.reused,"completed_at":datetime.now(timezone.utc).isoformat()}
                 self.persistence.save_checkpoint(project_id,"final_json",final_summary);now_f=datetime.now(timezone.utc).isoformat();phase10_msg="Analysis pipeline stopped: canonical schema 3.0 Final JSON is ready (FINAL_JSON_READY); Phase 10 settings migration is not implemented."
                 state["status"]=ProjectStatus.FINAL_JSON_READY.value;state["final_json"]=finalized.final_json;state["finalization"]=final_summary;state["error"]=phase10_msg;state.setdefault("timestamps",{})["final_json_ready_at"]=now_f;state["timestamps"]["updated_at"]=now_f;self.persistence.save_project(state)
                 if callbacks and callbacks.on_final_json_ready:callbacks.on_final_json_ready(final_summary)
                 if callbacks and callbacks.on_status_change:callbacks.on_status_change(ProjectStatus.FINAL_JSON_READY.value)
+                tracker.emit(ProgressEvent(
+                    state=ActivityState.LOCAL_PROCESSING.value,
+                    stage=WorkflowStage.FINAL_JSON.value,
+                    activity_text="Final JSON Ready — analysis complete.",
+                    completed=len(finalized.final_json["outputs"]),
+                    total=len(finalized.final_json["outputs"]), unit="outputs",
+                    reused=len(finalized.final_json["outputs"]) if finalized.reused else 0,
+                    stage_status="complete", analysis_complete=True,
+                ))
                 # Phase 11 boundary: canonical Final JSON is now the sole
                 # downstream authority and enters the same path as imports.
                 final_json = finalized.final_json
@@ -1087,8 +1187,16 @@ class ProjectWorkflow:
 
             outputs_def = final_json.get("outputs", [])
             outputs_state = state.setdefault("outputs", {})
+            tracker.emit(ProgressEvent(
+                state=ActivityState.RUNNING.value,
+                stage=WorkflowStage.VOICE.value,
+                activity_text=("No downstream outputs are required." if not outputs_def else "Preparing downstream output queue..."),
+                completed=0, total=len(outputs_def), unit="outputs",
+                stage_status="skipped" if not outputs_def else None,
+            ))
 
-            for out_def in outputs_def:
+            published_count = 0
+            for output_index, out_def in enumerate(outputs_def, start=1):
                 if cancellation_token:
                     cancellation_token.check_cancelled()
 
@@ -1147,6 +1255,15 @@ class ProjectWorkflow:
                     self.persistence.save_project(state)
                     if callbacks and callbacks.on_output_skipped:
                         callbacks.on_output_skipped(render_id, skip_ckpt)
+                    published_count += 1
+                    tracker.emit(ProgressEvent(
+                        state=ActivityState.RUNNING.value,
+                        stage=WorkflowStage.PUBLISH.value,
+                        activity_text="Reused completed render and publication checkpoint.",
+                        output_id=render_id, current_item=render_id,
+                        completed=published_count, total=len(outputs_def), unit="outputs",
+                        reused=published_count, item_reused=True,
+                    ))
                     continue
 
                 # Render output
@@ -1166,7 +1283,10 @@ class ProjectWorkflow:
                 self.persistence.save_project(state)
 
                 try:
-                    voice_cache = DownstreamVoiceCache(self.persistence.root, project_id)
+                    voice_cache = DownstreamVoiceCache(
+                        self.persistence.root, project_id,
+                        progress_callback=tracker.emit_payload,
+                    )
                     voice_result = voice_cache.prepare_output(
                         output_def=out_def,
                         final_json_hash=final_json_hash,
@@ -1182,6 +1302,7 @@ class ProjectWorkflow:
                         voice_adapter=self.voice_adapter,
                         narration_audio_map=voice_result.narration_audio_map,
                         cancellation_token=cancellation_token,
+                        progress_callback=tracker.emit_payload,
                     )
                 except CancelledError:
                     raise
@@ -1232,6 +1353,15 @@ class ProjectWorkflow:
                 self.persistence.save_project(state)
                 if callbacks and callbacks.on_output_completed:
                     callbacks.on_output_completed(render_id, completed_ckpt)
+                published_count += 1
+                tracker.emit(ProgressEvent(
+                    state=ActivityState.RUNNING.value,
+                    stage=WorkflowStage.PUBLISH.value,
+                    activity_text=f"Published output {output_index} / {len(outputs_def)}.",
+                    output_id=render_id, current_item=render_id,
+                    completed=published_count, total=len(outputs_def), unit="outputs",
+                    item_event="complete", item_key=render_id,
+                ))
 
             # All outputs complete!
             state["status"] = ProjectStatus.COMPLETED.value
@@ -1241,6 +1371,13 @@ class ProjectWorkflow:
             self.persistence.save_project(state)
             if callbacks and callbacks.on_status_change:
                 callbacks.on_status_change(ProjectStatus.COMPLETED.value)
+
+            tracker.terminate(
+                ActivityState.COMPLETE,
+                activity_text="Project complete. Publication checkpoints are ready.",
+                output_folder=str(resolved_output_dir),
+                published_count=published_count,
+            )
 
             return state
 
@@ -1252,4 +1389,15 @@ class ProjectWorkflow:
             self.persistence.save_project(state)
             if callbacks and callbacks.on_status_change:
                 callbacks.on_status_change(ProjectStatus.CANCELLED.value)
+            tracker.terminate(
+                ActivityState.CANCELLED,
+                activity_text="Project cancelled; completed checkpoints were preserved.",
+            )
+            raise
+        except Exception as exc:
+            tracker.terminate(
+                ActivityState.FAILED,
+                activity_text="Workflow failed; prior checkpoints and progress were preserved.",
+                error=str(exc)[:1000],
+            )
             raise

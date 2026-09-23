@@ -7,13 +7,14 @@ import json
 import os
 from pathlib import Path
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from toolrecap_v4.cancellation import CancellationToken
 from toolrecap_v4.errors import VoiceStudioUnavailableError
 from toolrecap_v4.persistence import atomic_write_json
 from toolrecap_v4.settings import AppSettings
 from toolrecap_v4.voice_studio import VoiceStudioAdapter, validate_wav_bytes
+from toolrecap_v4.progress import ActivityState, WorkflowStage, safe_emit
 
 VOICE_CACHE_VERSION = "downstream-voice-v1"
 
@@ -37,8 +38,15 @@ class VoiceCacheResult:
 class DownstreamVoiceCache:
     """Per-segment validated WAV cache independent of mix/render settings."""
 
-    def __init__(self, storage_root: Path | str, project_id: str) -> None:
+    def __init__(
+        self, storage_root: Path | str, project_id: str,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         self.base = Path(storage_root).resolve() / "projects" / project_id / "downstream" / "voice"
+        self.progress_callback = progress_callback
+
+    def _emit(self, **payload: Any) -> None:
+        safe_emit(self.progress_callback, stage=WorkflowStage.VOICE.value, **payload)
 
     def prepare_output(
         self,
@@ -52,11 +60,19 @@ class DownstreamVoiceCache:
         result: dict[str, Path] = {}
         hashes: dict[str, str] = {}
         reused = synthesized = 0
-        for segment in output_def.get("segments", []):
+        narration_segments = [
+            segment for segment in output_def.get("segments", [])
+            if segment.get("type") == "narration" and segment.get("narration")
+        ]
+        total = len(narration_segments)
+        self._emit(
+            state=ActivityState.RUNNING.value,
+            activity_text=f"Preparing {total} narration segments for {output_def.get('render_id')}...",
+            output_id=output_def.get("render_id"), completed=0, total=total, unit="segments",
+        )
+        for segment in narration_segments:
             if cancellation_token:
                 cancellation_token.check_cancelled()
-            if segment.get("type") != "narration" or not segment.get("narration"):
-                continue
             segment_id = segment["segment_id"]
             dependencies = {
                 "version": VOICE_CACHE_VERSION,
@@ -86,11 +102,25 @@ class DownstreamVoiceCache:
                 result[segment_id] = wav_path
                 hashes[segment_id] = digest
                 reused += 1
+                self._emit(
+                    state=ActivityState.RUNNING.value,
+                    activity_text=f"Narration {segment_id} reused from cache.",
+                    output_id=output_def.get("render_id"), current_item=segment_id,
+                    completed=reused + synthesized, total=total, unit="segments",
+                    reused=reused, item_event="complete", item_key=segment_id, item_reused=True,
+                )
                 continue
             if voice_adapter is None:
                 raise VoiceStudioUnavailableError(
                     f"Narration segment '{segment_id}' requires configured VoiceStudio."
                 )
+            self._emit(
+                state=ActivityState.RUNNING.value,
+                activity_text=f"Generating narration {segment_id} with VoiceStudio...",
+                output_id=output_def.get("render_id"), current_item=segment_id,
+                completed=reused + synthesized, total=total, unit="segments",
+                reused=reused, waiting_for="VoiceStudio", item_event="start", item_key=segment_id,
+            )
             wav_bytes = voice_adapter.synthesize(
                 segment["narration"],
                 voice=settings.voice_id,
@@ -123,6 +153,19 @@ class DownstreamVoiceCache:
             result[segment_id] = wav_path
             hashes[segment_id] = digest
             synthesized += 1
+            self._emit(
+                state=ActivityState.RUNNING.value,
+                activity_text=f"Narration {segment_id} generated and cached.",
+                output_id=output_def.get("render_id"), current_item=segment_id,
+                completed=reused + synthesized, total=total, unit="segments",
+                reused=reused, item_event="complete", item_key=segment_id,
+            )
+        self._emit(
+            state=ActivityState.LOCAL_PROCESSING.value,
+            activity_text=f"Voice preparation complete for {output_def.get('render_id')}.",
+            output_id=output_def.get("render_id"), completed=total, total=total,
+            unit="segments", reused=reused, stage_status="complete" if total else "skipped",
+        )
         return VoiceCacheResult(result, hashes, reused, synthesized)
 
     @staticmethod

@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 import uuid
 
 from toolrecap_v4.analysis.evidence_store import EvidenceStore
@@ -38,6 +38,7 @@ from toolrecap_v4.errors import (
 )
 from toolrecap_v4.gateway import GatewayClient
 from toolrecap_v4.persistence import atomic_write_json
+from toolrecap_v4.progress import ActivityState, WorkflowStage, safe_emit
 
 SCANNER_NORMALIZATION_VERSION = "scanner-normalization-v1"
 MAX_RAW_RESPONSE_BYTES = 1_048_576
@@ -251,10 +252,15 @@ class ScannerService:
         gateway_client: GatewayClient,
         storage_root: Path | str,
         config: ScannerConfig,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.gateway_client = gateway_client
         self.storage_root = Path(storage_root).resolve()
         self.config = config
+        self.progress_callback = progress_callback
+
+    def _emit(self, **payload: Any) -> None:
+        safe_emit(self.progress_callback, stage=WorkflowStage.SCANNER.value, **payload)
 
     def _prompt_for(self, episode: PreparedEpisode, chunk_id: str, start_ms: int, end_ms: int, parts: Sequence[Any]) -> str:
         return build_scanner_prompt(
@@ -340,6 +346,22 @@ class ScannerService:
         for attempt in range(start_attempt, end_attempt + 1):
             if cancellation_token:
                 cancellation_token.check_cancelled()
+            phase = "scanner" if recovered is None and attempt == 0 else "scanner_repair"
+            self._emit(
+                state=ActivityState.REPAIRING.value if phase == "scanner_repair" else ActivityState.WAITING_FOR_AI.value,
+                activity_text=(
+                    f"Repairing Scanner response — attempt {attempt} / {end_attempt}"
+                    if phase == "scanner_repair" else "Waiting for Scanner response..."
+                ),
+                episode_id=episode.episode_id,
+                chunk_id=chunk.chunk_id,
+                current_item=chunk.chunk_id,
+                waiting_for="AI",
+                retry_attempt=attempt if phase == "scanner_repair" else None,
+                retry_limit=end_attempt if phase == "scanner_repair" else None,
+                item_event="start",
+                item_key=chunk.chunk_id,
+            )
             try:
                 result = self.gateway_client.submit_text_chat(
                     prompt=prompt,
@@ -349,7 +371,7 @@ class ScannerService:
                     stream=True,
                     expect_json=False,
                     cancellation_token=cancellation_token,
-                    phase="scanner" if recovered is None and attempt == 0 else "scanner_repair",
+                    phase=phase,
                 )
             except (CancelledError, ScannerCapacityError):
                 raise
@@ -358,11 +380,11 @@ class ScannerService:
                     f"Gateway failed for Scanner chunk {chunk.chunk_id}: {exc}",
                     episode_id=episode.episode_id,
                     chunk_id=chunk.chunk_id,
-                    request_phase="scanner" if recovered is None and attempt == 0 else "scanner_repair",
+                    request_phase=phase,
                     retry_count=attempt,
                 ) from exc
             measurement = {
-                "phase": "scanner" if recovered is None and attempt == 0 else "scanner_repair",
+                "phase": phase,
                 "episode_id": episode.episode_id,
                 "chunk_id": chunk.chunk_id,
                 "model": self.config.model,
@@ -377,6 +399,13 @@ class ScannerService:
                 self.config.max_raw_response_bytes, measurement,
             )
             measurements.append(measurement)
+            self._emit(
+                state=ActivityState.LOCAL_PROCESSING.value,
+                activity_text="Scanner response received; validating response...",
+                episode_id=episode.episode_id,
+                chunk_id=chunk.chunk_id,
+                current_item=chunk.chunk_id,
+            )
             try:
                 parsed = parse_scanner_json(result.raw_response, episode_id=episode.episode_id, chunk_id=chunk.chunk_id)
                 observations = validate_scanner_response(
@@ -413,6 +442,7 @@ class ScannerService:
         chunks: Sequence[ScannerChunk],
         cache: _ScannerChunkCache,
         cancellation_token: CancellationToken | None,
+        on_requested_complete: Callable[[ScannerChunkResult], None] | None = None,
     ) -> tuple[ScannerChunkResult, ...]:
         results: dict[int, ScannerChunkResult] = {}
         pending_chunks: list[ScannerChunk] = []
@@ -442,6 +472,8 @@ class ScannerService:
                         chunk = active.pop(future)
                         result = future.result()
                         results[chunk.order] = result
+                        if on_requested_complete is not None:
+                            on_requested_complete(result)
                         try:
                             next_chunk = next(iterator)
                         except StopIteration:
@@ -452,6 +484,44 @@ class ScannerService:
                     future.cancel()
                 raise
         return tuple(results[index] for index in sorted(results))
+
+    def inspect_project_progress(
+        self,
+        project_id: str,
+        episodes: Sequence[PreparedEpisode],
+    ) -> dict[str, Any]:
+        """Inspect deterministic plans and validated chunk checkpoints without Gateway calls."""
+        ordered = tuple(sorted(episodes, key=lambda item: item.episode_id))
+        revision = compute_evidence_revision(ordered, self.config)
+        cache = _ScannerChunkCache(self.storage_root, project_id, revision)
+        total = completed = completed_episodes = 0
+        next_chunk = next_episode = None
+        episode_totals: dict[str, dict[str, int]] = {}
+        for episode in ordered:
+            chunks = self._plan(episode)
+            episode_complete = 0
+            total += len(chunks)
+            for chunk in chunks:
+                if cache.load(episode.episode_id, chunk) is not None:
+                    completed += 1
+                    episode_complete += 1
+                elif next_chunk is None:
+                    next_chunk = chunk.chunk_id
+                    next_episode = episode.episode_id
+            if episode_complete == len(chunks):
+                completed_episodes += 1
+            episode_totals[episode.episode_id] = {"completed": episode_complete, "total": len(chunks)}
+        return {
+            "completed": completed,
+            "total": total,
+            "percent": completed * 100.0 / total if total else None,
+            "completed_episodes": completed_episodes,
+            "total_episodes": len(ordered),
+            "next_chunk": next_chunk,
+            "next_episode": next_episode,
+            "episodes": episode_totals,
+            "evidence_revision": revision,
+        }
 
     def _allocate_evidence(
         self,
@@ -528,11 +598,48 @@ class ScannerService:
         episode_counts: dict[str, int] = {}
         measurements: list[dict[str, Any]] = []
         reused = requested = 0
+        plans = {episode.episode_id: self._plan(episode) for episode in ordered}
+        initial = self.inspect_project_progress(project_id, ordered)
+        completed_chunks = initial["completed"]
+        self._emit(
+            state=ActivityState.RUNNING.value,
+            activity_text=(
+                f"Reused {completed_chunks} validated Scanner chunks; continuing from {initial['next_chunk']}."
+                if completed_chunks else "Scanner chunk plan ready."
+            ),
+            episode_id=initial["next_episode"],
+            chunk_id=initial["next_chunk"],
+            current_item=initial["next_chunk"],
+            completed=completed_chunks,
+            total=initial["total"],
+            unit="chunks",
+            reused=completed_chunks,
+        )
+
+        def _requested_complete(result: ScannerChunkResult) -> None:
+            nonlocal completed_chunks
+            completed_chunks += 1
+            self._emit(
+                state=ActivityState.RUNNING.value,
+                activity_text="Scanner chunk completed and checkpoint saved.",
+                chunk_id=result.chunk.chunk_id,
+                current_item=result.chunk.chunk_id,
+                completed=completed_chunks,
+                total=initial["total"],
+                unit="chunks",
+                reused=initial["completed"],
+                item_event="complete",
+                item_key=result.chunk.chunk_id,
+            )
+
         for episode in ordered:
             if cancellation_token:
                 cancellation_token.check_cancelled()
-            chunks = self._plan(episode)
-            chunk_results = self._scan_episode_chunks(episode, chunks, cache, cancellation_token)
+            chunks = plans[episode.episode_id]
+            chunk_results = self._scan_episode_chunks(
+                episode, chunks, cache, cancellation_token,
+                on_requested_complete=_requested_complete,
+            )
             evidence = self._allocate_evidence(episode, chunk_results, cancellation_token)
             store.save_episode(
                 revision,
@@ -559,6 +666,12 @@ class ScannerService:
             [episode.episode_id for episode in ordered],
             dependency_signature=signature,
             cancellation_token=cancellation_token,
+        )
+        self._emit(
+            state=ActivityState.LOCAL_PROCESSING.value,
+            activity_text="Full Episode Evidence checkpoint completed.",
+            completed=initial["total"], total=initial["total"], unit="chunks",
+            reused=reused, stage_status="complete",
         )
         return ScannerProjectResult(
             project_id=project_id,

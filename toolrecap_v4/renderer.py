@@ -28,7 +28,7 @@ import re
 import shutil
 import sys
 import tempfile
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from toolrecap_v4.cancellation import CancellationToken
 from toolrecap_v4.errors import (
@@ -64,6 +64,7 @@ from toolrecap_v4.subtitles import (
 )
 from toolrecap_v4.validator import validate_windows_name
 from toolrecap_v4.voice_studio import VoiceStudioAdapter, validate_wav_bytes
+from toolrecap_v4.progress import ActivityState, WorkflowStage, safe_emit
 
 
 class RenderError(ToolRecapError):
@@ -288,6 +289,7 @@ def render_output(
     narration_audio_map: dict[str, Path | str] | None = None,
     ffmpeg_path: Path | str | None = None,
     work_dir: Path | str | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> RenderResult:
     """Render a single output specification according to all technical invariants."""
     if cancellation_token:
@@ -310,6 +312,9 @@ def render_output(
     segments = output_def.get("segments", [])
     if not segments:
         raise RenderError(f"Output '{render_id}' contains no segments.")
+
+    def emit(stage: WorkflowStage, **payload: Any) -> None:
+        safe_emit(progress_callback, stage=stage.value, output_id=render_id, **payload)
 
     # Collect source files
     source_names = [seg["source_file"] for seg in segments]
@@ -376,6 +381,12 @@ def render_output(
             quality=cfg.quality,
             use_gpu=cfg.use_gpu,
             ffmpeg_path=ffmpeg,
+        )
+        emit(
+            WorkflowStage.AUDIO_MIX,
+            state=ActivityState.LOCAL_PROCESSING.value,
+            activity_text="Mixing narration with original audio...",
+            current_item=render_id, completed=0, total=len(segments), unit="segments",
         )
 
         for seg_idx, seg in enumerate(segments):
@@ -549,6 +560,20 @@ def render_output(
             if not seg_mkv.is_file() or seg_mkv.stat().st_size == 0:
                 raise RenderError(f"Failed to produce intermediate segment MKV for segment '{seg_id}'.")
             segment_mkv_paths.append(seg_mkv)
+            emit(
+                WorkflowStage.AUDIO_MIX,
+                state=ActivityState.LOCAL_PROCESSING.value,
+                activity_text=f"Mixed segment {seg_idx + 1} / {len(segments)}.",
+                current_item=seg_id, completed=seg_idx + 1, total=len(segments), unit="segments",
+            )
+
+        emit(
+            WorkflowStage.AUDIO_MIX,
+            state=ActivityState.LOCAL_PROCESSING.value,
+            activity_text="Audio mix and segment assembly ready.",
+            current_item=render_id, completed=len(segments), total=len(segments),
+            unit="segments", stage_status="complete",
+        )
 
         # Concatenate all segment MKVs via concat demuxer
         concat_list_file = temp_dir / "concat_list.txt"
@@ -608,6 +633,13 @@ def render_output(
 
         # Pass 2: Final encode to temp_final_mp4
         temp_final_mp4 = temp_dir / f"{title}.mp4"
+        encoder_label = getattr(enc_status, "label", None) or getattr(enc_status, "encoder", None) or "FFmpeg"
+        emit(
+            WorkflowStage.RENDER,
+            state=ActivityState.LOCAL_PROCESSING.value,
+            activity_text=f"Encoding final video with {encoder_label}...",
+            current_item=render_id,
+        )
         run_command(
             [
                 str(ffmpeg),
@@ -648,7 +680,19 @@ def render_output(
             (temp_narr_srt, target_narr_srt),
             (temp_orig_srt, target_orig_srt),
         ]
+        emit(
+            WorkflowStage.PUBLISH,
+            state=ActivityState.LOCAL_PROCESSING.value,
+            activity_text="Publishing output files atomically...",
+            current_item=render_id,
+        )
         _stage_and_publish_files(published_files, cancellation_token=cancellation_token)
+        emit(
+            WorkflowStage.PUBLISH,
+            state=ActivityState.LOCAL_PROCESSING.value,
+            activity_text="Output published.",
+            current_item=render_id, completed=1, total=1, unit="outputs", stage_status="complete",
+        )
 
         v_codec = final_probe.video_streams[0].codec if final_probe.video_streams else "h264"
         a_codec = final_probe.audio_streams[0].codec if final_probe.audio_streams else "aac"

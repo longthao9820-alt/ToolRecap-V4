@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from toolrecap_v4.analysis.evidence_store import EvidenceStore
 from toolrecap_v4.analysis.finalizer.catalog import SeasonEvidenceCatalog
@@ -36,6 +36,7 @@ from toolrecap_v4.errors import (
     PlannerValidationError,
 )
 from toolrecap_v4.gateway import GatewayClient
+from toolrecap_v4.progress import ActivityState, WorkflowStage, safe_emit
 
 MAX_PLANNER_RAW_RESPONSE_BYTES = 2 * 1024 * 1024
 
@@ -79,10 +80,18 @@ def _digest(value: Any) -> str:
 
 
 class PlannerService:
-    def __init__(self, gateway_client: GatewayClient, storage_root: Path | str, config: PlannerConfig) -> None:
+    def __init__(
+        self, gateway_client: GatewayClient, storage_root: Path | str, config: PlannerConfig,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         self.gateway_client = gateway_client
         self.storage_root = Path(storage_root).resolve()
         self.config = config
+        self.progress_callback = progress_callback
+
+    def _emit(self, **payload: Any) -> None:
+        stage = payload.pop("stage", WorkflowStage.PLANNER.value)
+        safe_emit(self.progress_callback, stage=stage, **payload)
 
     def _capacity(self, prompt: str) -> tuple[int, str]:
         size = measure_text_request_bytes(
@@ -152,6 +161,17 @@ class PlannerService:
                 cancellation_token.check_cancelled()
             measured, capacity = self._capacity(current_prompt)
             phase = "season_planner" if recovered is None and offset == 0 else "season_planner_repair"
+            self._emit(
+                state=ActivityState.REPAIRING.value if phase.endswith("repair") else ActivityState.WAITING_FOR_AI.value,
+                activity_text=(
+                    f"Repairing Planner response — attempt {attempt} / {next_attempt + request_count - 1}"
+                    if phase.endswith("repair") else f"Waiting for Planner response ({round_id})..."
+                ),
+                current_item=round_id, waiting_for="AI",
+                retry_attempt=attempt if phase.endswith("repair") else None,
+                retry_limit=next_attempt + request_count - 1 if phase.endswith("repair") else None,
+                item_event="start", item_key=round_id,
+            )
             try:
                 result = self.gateway_client.submit_text_chat(
                     prompt=current_prompt, model=self.config.model,
@@ -180,6 +200,11 @@ class PlannerService:
                 "duration_ms": (result.metadata or {}).get("duration_ms"),
             }
             measurements.append(measurement)
+            self._emit(
+                state=ActivityState.LOCAL_PROCESSING.value,
+                activity_text=f"Planner response received; validating {round_id}...",
+                current_item=round_id,
+            )
             store.save_raw(
                 round_id, attempt, result.raw_response,
                 limit=self.config.max_raw_response_bytes,
@@ -227,6 +252,11 @@ class PlannerService:
             action = validate_planner_action(
                 cached_draft, project_id=project_id, round_id=round_id, catalog=catalog,
             )
+            self._emit(
+                state=ActivityState.RUNNING.value,
+                activity_text="Reused validated Planner Draft checkpoint.",
+                current_item=round_id, reused=1, stage_status="complete",
+            )
             return PlannerRunResult(
                 project_id, session_id, dependency_digest, action.draft,
                 int(round_id.rsplit("-", 1)[-1]), (), True, store.draft_path,
@@ -244,6 +274,11 @@ class PlannerService:
             if cancellation_token:
                 cancellation_token.check_cancelled()
             round_id = f"round-{round_number:03d}"
+            self._emit(
+                state=ActivityState.RUNNING.value,
+                activity_text=f"Planner round {round_number}: building request...",
+                current_item=round_id,
+            )
             completed = store.load_round(round_id, dependency_digest)
             if completed is not None:
                 action = validate_planner_action(
@@ -269,11 +304,25 @@ class PlannerService:
                 )
                 fetch_dict = None
                 if action.action == "REQUEST_EVIDENCE":
+                    requested = len(action.requests)
+                    self._emit(
+                        state=ActivityState.LOCAL_PROCESSING.value,
+                        stage=WorkflowStage.EVIDENCE.value,
+                        activity_text=f"Fetching {requested} requested Full Evidence groups...",
+                        current_item=round_id, completed=0, total=requested, unit="requests",
+                    )
                     fetch = fetcher.fetch(
                         round_id=round_id, requests=action.requests,
                         cancellation_token=cancellation_token,
                     )
                     fetch_dict = fetch.to_dict()
+                    self._emit(
+                        state=ActivityState.LOCAL_PROCESSING.value,
+                        stage=WorkflowStage.EVIDENCE.value,
+                        activity_text="Requested Full Evidence fetched.",
+                        current_item=round_id, completed=requested, total=requested,
+                        unit="requests", stage_status="complete",
+                    )
                 store.save_round(
                     round_id, dependency_digest=dependency_digest,
                     action=action.to_dict(), fetch=fetch_dict,
@@ -283,6 +332,12 @@ class PlannerService:
                 store.save_draft(
                     dependency_digest=dependency_digest, action=action.to_dict(),
                     cancellation_token=cancellation_token,
+                )
+                self._emit(
+                    state=ActivityState.LOCAL_PROCESSING.value,
+                    activity_text="Planner Draft validated and checkpointed.",
+                    current_item=round_id, stage_status="complete",
+                    item_event="complete", item_key=round_id,
                 )
                 return PlannerRunResult(
                     project_id, session_id, dependency_digest, action.draft,

@@ -22,6 +22,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 # Ensure Tcl/Tk paths on Windows for robust portable execution
@@ -73,6 +74,16 @@ from toolrecap_v4.ui.notifications import WindowsNotificationService
 from toolrecap_v4.ui.settings_dialog import SettingsDialog
 from toolrecap_v4.ui.worker import SourceDiscoveryWorker, WorkerMessage, WorkflowWorker
 from toolrecap_v4.workflow import OutputStatus, ProjectStatus
+from toolrecap_v4.progress import (
+    ACTIVE_STATES,
+    ActivityState,
+    PIPELINE_STAGES,
+    STAGE_LABELS,
+    format_duration as format_workflow_duration,
+    format_last_activity,
+    format_wait_duration,
+    reconstruct_project_progress,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -276,12 +287,11 @@ class MainWindow(tk.Tk):
             except tk.TclError:
                 if attempt == 2:
                     raise
-                import time
                 time.sleep(0.05)
 
         self.title(f"ToolRecap V4 — Tự Động Hóa Video Recap (v{__version__})")
-        self.geometry("1120x760")
-        self.minsize(920, 680)
+        self.geometry("1120x900")
+        self.minsize(920, 760)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Storage & State
@@ -303,6 +313,7 @@ class MainWindow(tk.Tk):
         self._poll_job: Optional[str] = None
         self._gpu_detect_job: Optional[str] = None
         self._close_job: Optional[str] = None
+        self._activity_timer_job: Optional[str] = None
 
         self.settings = self.settings_manager.load()
         self.discovered_sources: List[SourceFingerprint] = []
@@ -317,6 +328,26 @@ class MainWindow(tk.Tk):
         self.progress_var = tk.DoubleVar(value=0.0)
         self.progress_label_var = tk.StringVar(value="0%")
         self.gpu_status_var = tk.StringVar(value="Đang kiểm tra phần cứng...")
+        self.activity_state_var = tk.StringVar(value=ActivityState.IDLE.value)
+        self.activity_stage_var = tk.StringVar(value="Not started")
+        self.activity_item_var = tk.StringVar(value="—")
+        self.activity_progress_var = tk.StringVar(value="Progress not yet measurable")
+        self.activity_text_var = tk.StringVar(value="Ready")
+        self.activity_stage_time_var = tk.StringVar(value="0 minutes")
+        self.activity_session_time_var = tk.StringVar(value="0 minutes")
+        self.activity_project_time_var = tk.StringVar(value="Unavailable")
+        self.activity_eta_var = tk.StringVar(value="Unknown")
+        self.activity_last_var = tk.StringVar(value="Unavailable")
+        self.activity_wait_var = tk.StringVar(value="")
+        self.activity_summary_var = tk.StringVar(value="")
+        self.pipeline_var = tk.StringVar(value="○ Preparation → ○ Scanner → ○ Catalog → ○ Planner")
+        self._activity_snapshot: Dict[str, Any] = {
+            "state": ActivityState.IDLE.value, "active": False,
+            "session_elapsed_seconds": 0.0, "project_elapsed_seconds": None,
+            "stage_elapsed_seconds": 0.0, "estimated_remaining_seconds": None,
+            "last_activity_at": None, "recent_activity": [],
+        }
+        self._activity_received_monotonic = time.monotonic()
 
         self._build_style()
         self._build_ui()
@@ -330,6 +361,7 @@ class MainWindow(tk.Tk):
 
         # Start periodic queue polling
         self._poll_job = safe_after(self, 100, self._poll_queue)
+        self._activity_timer_job = safe_after(self, 1000, self._update_activity_timer)
 
     def _build_style(self) -> None:
         style = ttk.Style(self)
@@ -434,13 +466,78 @@ class MainWindow(tk.Tk):
         scroll.grid(row=0, column=1, sticky="ns")
         self.tree.bind("<Double-1>", self._on_double_click_tree)
 
-        # 5. Progress Section
-        prog_frame = ttk.LabelFrame(container, text="Progress", padding=(10, 6))
-        prog_frame.grid(row=4, column=0, sticky="ew", pady=(0, 8))
-        prog_frame.columnconfigure(0, weight=1)
+        # 5. Dedicated real-time workflow status/activity panel
+        self.activity_panel = ttk.LabelFrame(container, text="Real-Time Status / Activity", padding=10)
+        self.activity_panel.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        self.activity_panel.columnconfigure(0, weight=3)
+        self.activity_panel.columnconfigure(1, weight=2)
 
-        self.progressbar = ttk.Progressbar(prog_frame, variable=self.progress_var, maximum=100)
-        self.progressbar.grid(row=0, column=0, sticky="ew")
+        primary = ttk.Frame(self.activity_panel)
+        primary.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        primary.columnconfigure(1, weight=1)
+
+        ttk.Label(primary, text="STATUS", font=("Segoe UI Semibold", 9)).grid(row=0, column=0, sticky="w")
+        self.activity_state_label = ttk.Label(
+            primary, textvariable=self.activity_state_var,
+            font=("Segoe UI Semibold", 12), foreground="#0969da",
+        )
+        self.activity_state_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+        detail_rows = (
+            ("Current Stage:", self.activity_stage_var),
+            ("Current Item:", self.activity_item_var),
+            ("Progress:", self.activity_progress_var),
+            ("Activity:", self.activity_text_var),
+        )
+        for row, (label, variable) in enumerate(detail_rows, start=1):
+            ttk.Label(primary, text=label, font=("Segoe UI Semibold", 9)).grid(
+                row=row, column=0, sticky="nw", pady=(3, 0),
+            )
+            ttk.Label(primary, textvariable=variable, wraplength=560).grid(
+                row=row, column=1, sticky="w", padx=(8, 0), pady=(3, 0),
+            )
+
+        self.progressbar = ttk.Progressbar(primary, variable=self.progress_var, maximum=100)
+        self.progressbar.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(7, 4))
+        self._progress_indeterminate = False
+
+        ttk.Label(primary, textvariable=self.pipeline_var, wraplength=630, foreground="#555").grid(
+            row=6, column=0, columnspan=2, sticky="w", pady=(2, 5),
+        )
+
+        timing = ttk.Frame(primary)
+        timing.grid(row=7, column=0, columnspan=2, sticky="ew")
+        for column in range(3):
+            timing.columnconfigure(column, weight=1)
+        timing_values = (
+            ("Stage Time", self.activity_stage_time_var),
+            ("Current Session", self.activity_session_time_var),
+            ("Project Processing", self.activity_project_time_var),
+            ("Estimated Remaining", self.activity_eta_var),
+            ("Last Activity", self.activity_last_var),
+            ("AI Wait", self.activity_wait_var),
+        )
+        for index, (label, variable) in enumerate(timing_values):
+            row, column = divmod(index, 3)
+            cell = ttk.Frame(timing)
+            cell.grid(row=row, column=column, sticky="w", padx=(0, 12), pady=(2, 0))
+            ttk.Label(cell, text=f"{label}:", font=("Segoe UI Semibold", 8)).pack(anchor="w")
+            ttk.Label(cell, textvariable=variable).pack(anchor="w")
+
+        ttk.Label(primary, textvariable=self.activity_summary_var, wraplength=630, foreground="#0969da").grid(
+            row=8, column=0, columnspan=2, sticky="w", pady=(6, 0),
+        )
+
+        recent = ttk.Frame(self.activity_panel)
+        recent.grid(row=0, column=1, sticky="nsew")
+        recent.columnconfigure(0, weight=1)
+        recent.rowconfigure(1, weight=1)
+        ttk.Label(recent, text="Recent Activity", font=("Segoe UI Semibold", 9)).grid(row=0, column=0, sticky="w")
+        self.activity_log = tk.Text(
+            recent, height=10, width=43, wrap="word", state=tk.DISABLED,
+            font=("Consolas", 8), relief="solid", borderwidth=1,
+        )
+        self.activity_log.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
 
         # 6. Action Controls Frame
         action_frame = ttk.Frame(container)
@@ -878,6 +975,23 @@ class MainWindow(tk.Tk):
         self.source_var.set(f"Dự án đã lưu: {self.current_project_name} ({len(sources)} video)")
         self.status_var.set(f"Có thể tiếp tục dự án '{self.current_project_name}' từ checkpoint đã lưu.")
         self.btn_resume.config(state="normal")
+        self._load_persisted_activity_async(project_id)
+
+    def _load_persisted_activity_async(self, project_id: str) -> None:
+        """Reconstruct checkpoints off the Tk thread, once per project selection."""
+        msg_queue = self.msg_queue
+        persistence = self.persistence
+
+        def _load() -> None:
+            try:
+                snapshot = reconstruct_project_progress(persistence, project_id)
+                msg_queue.put(WorkerMessage(kind="activity", data=snapshot))
+            except Exception as exc:
+                logger.warning("Failed to reconstruct saved workflow progress for %s: %s", project_id, exc)
+
+        threading.Thread(
+            target=_load, daemon=True, name=f"ProgressReconstruction-{project_id[:24]}",
+        ).start()
 
     def _on_select_resume_project(self, _event: Any = None) -> None:
         project_id = self._resume_project_ids.get(self.cmb_resume_projects.get())
@@ -969,12 +1083,169 @@ class MainWindow(tk.Tk):
             if not getattr(self, "_is_closed", False):
                 self._poll_job = safe_after(self, 100, self._poll_queue)
 
+    def _set_activity_snapshot(self, snapshot: Dict[str, Any], *, merge: bool = False) -> None:
+        if merge:
+            self._activity_snapshot.update(snapshot)
+        else:
+            self._activity_snapshot = dict(snapshot)
+        self._activity_received_monotonic = time.monotonic()
+        self._render_activity_snapshot()
+
+    def _activity_live_seconds(self, field: str) -> float | None:
+        value = self._activity_snapshot.get(field)
+        if value is None:
+            return None
+        result = float(value)
+        if self._activity_snapshot.get("active"):
+            result += max(0.0, time.monotonic() - self._activity_received_monotonic)
+        return result
+
+    def _last_activity_age(self) -> float | None:
+        raw = self._activity_snapshot.get("last_activity_at")
+        if not raw:
+            return None
+        try:
+            value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return max(0.0, (datetime.now(timezone.utc) - value.astimezone(timezone.utc)).total_seconds())
+        except (TypeError, ValueError):
+            return None
+
+    def _update_activity_timer(self) -> None:
+        if getattr(self, "_is_closed", False):
+            return
+        self._render_activity_snapshot(timer_only=True)
+        self._activity_timer_job = safe_after(self, 1000, self._update_activity_timer)
+
+    def _render_activity_snapshot(self, *, timer_only: bool = False) -> None:
+        snapshot = self._activity_snapshot
+        state = str(snapshot.get("state") or ActivityState.IDLE.value)
+        self.activity_state_var.set(state)
+        colors = {
+            ActivityState.FAILED.value: "#b42318",
+            ActivityState.COMPLETE.value: "#1a7f37",
+            ActivityState.CANCELLED.value: "#9a6700",
+            ActivityState.CANCELLING.value: "#9a6700",
+            ActivityState.REPAIRING.value: "#9a6700",
+            ActivityState.RETRYING.value: "#9a6700",
+        }
+        self.activity_state_label.config(foreground=colors.get(state, "#0969da"))
+
+        self.activity_stage_time_var.set(format_workflow_duration(self._activity_live_seconds("stage_elapsed_seconds")))
+        self.activity_session_time_var.set(format_workflow_duration(self._activity_live_seconds("session_elapsed_seconds")))
+        self.activity_project_time_var.set(format_workflow_duration(self._activity_live_seconds("project_elapsed_seconds")))
+        eta = snapshot.get("estimated_remaining_seconds")
+        self.activity_eta_var.set("Unknown" if eta is None else format_workflow_duration(float(eta)))
+        age = self._last_activity_age()
+        self.activity_last_var.set(format_last_activity(age))
+        if state == ActivityState.WAITING_FOR_AI.value:
+            self.activity_wait_var.set(format_wait_duration(age))
+        else:
+            self.activity_wait_var.set("—")
+
+        if timer_only:
+            return
+
+        self.activity_stage_var.set(str(snapshot.get("stage_label") or STAGE_LABELS.get(str(snapshot.get("stage") or ""), "Not started")))
+        item = snapshot.get("current_item") or snapshot.get("chunk_id") or snapshot.get("output_id") or snapshot.get("episode_id")
+        self.activity_item_var.set(str(item or "—"))
+        self.activity_text_var.set(str(snapshot.get("activity_text") or "Ready"))
+        completed = snapshot.get("completed")
+        total = snapshot.get("total")
+        unit = str(snapshot.get("unit") or "items")
+        reused = snapshot.get("reused")
+        if completed is not None and total is not None:
+            if int(total) > 0:
+                percent = float(completed) * 100.0 / float(total)
+                progress_text = f"{completed} / {total} {unit} — {percent:.0f}%"
+                if reused:
+                    progress_text += f" (reused: {reused})"
+                self.progress_var.set(percent)
+                if self._progress_indeterminate:
+                    self.progressbar.stop()
+                    self._progress_indeterminate = False
+                self.progressbar.config(mode="determinate")
+            else:
+                progress_text = f"0 / 0 {unit} — Not required"
+                self.progress_var.set(0.0)
+                if self._progress_indeterminate:
+                    self.progressbar.stop()
+                    self._progress_indeterminate = False
+                self.progressbar.config(mode="determinate")
+        else:
+            progress_text = "In progress — total not yet known" if snapshot.get("active") else "Progress not yet measurable"
+            self.progressbar.config(mode="indeterminate")
+            if snapshot.get("active") and not self._progress_indeterminate:
+                self.progressbar.start(12)
+                self._progress_indeterminate = True
+            elif not snapshot.get("active") and self._progress_indeterminate:
+                self.progressbar.stop()
+                self._progress_indeterminate = False
+        self.activity_progress_var.set(progress_text)
+
+        short_labels = {
+            "preparation": "Preparation", "scanner": "Scanner", "catalog": "Catalog",
+            "planner": "Planner", "evidence": "Evidence", "vision": "Vision",
+            "final_plan": "Final Plan", "writers": "Writers", "final_json": "Final JSON",
+            "voice": "Voice", "audio_mix": "Audio", "render": "Render", "publish": "Publish",
+        }
+        symbols = {"complete": "✓", "active": "●", "pending": "○", "retry": "↻", "skipped": "—", "failed": "!"}
+        pipeline = snapshot.get("pipeline") if isinstance(snapshot.get("pipeline"), dict) else {}
+        self.pipeline_var.set("  →  ".join(
+            f"{symbols.get(str(pipeline.get(stage, 'pending')), '○')} {short_labels[stage]}"
+            for stage in PIPELINE_STAGES
+        ))
+
+        summary: list[str] = []
+        if snapshot.get("analysis_seconds") is not None:
+            summary.append(f"Analysis Time: {format_workflow_duration(snapshot['analysis_seconds'])}")
+        elif snapshot.get("analysis_time_unavailable"):
+            summary.append("Previous Analysis Time: Unavailable")
+        if snapshot.get("downstream_seconds") is not None:
+            summary.append(f"Downstream Time: {format_workflow_duration(snapshot['downstream_seconds'])}")
+        if snapshot.get("completion_seconds") is not None:
+            summary.append(f"Completion Time: {format_workflow_duration(snapshot['completion_seconds'])}")
+        if snapshot.get("published_count") is not None:
+            summary.append(f"Videos Published: {snapshot['published_count']}")
+        if snapshot.get("output_folder"):
+            summary.append(f"Output Folder: {snapshot['output_folder']}")
+        if snapshot.get("error"):
+            summary.append(f"Error: {str(snapshot['error'])[:300]}")
+        self.activity_summary_var.set("  |  ".join(summary))
+
+        rows = snapshot.get("recent_activity") if isinstance(snapshot.get("recent_activity"), list) else []
+        display_lines: list[str] = []
+        for row in rows[-12:]:
+            try:
+                timestamp = datetime.fromisoformat(str(row.get("timestamp", "")).replace("Z", "+00:00")).astimezone()
+                prefix = timestamp.strftime("%H:%M:%S")
+            except (TypeError, ValueError):
+                prefix = "--:--:--"
+            display_lines.append(f"{prefix}  {str(row.get('text', ''))[:240]}")
+        self.activity_log.config(state=tk.NORMAL)
+        self.activity_log.delete("1.0", tk.END)
+        self.activity_log.insert("1.0", "\n".join(display_lines) if display_lines else "No activity yet.")
+        self.activity_log.config(state=tk.DISABLED)
+        self.activity_log.see(tk.END)
+
     def _handle_worker_message(self, msg: WorkerMessage) -> None:
         kind = msg.kind
         data = msg.data
 
         if kind == "log":
             self._log(str(data))
+
+        elif kind == "activity" and isinstance(data, dict):
+            event_project = data.get("project_id")
+            if event_project and self.current_project_id and event_project != self.current_project_id:
+                return
+            if data.get("reconstructed") and self.worker.is_running:
+                return
+            self._set_activity_snapshot(data)
+
+        elif kind == "activity_patch" and isinstance(data, dict):
+            self._set_activity_snapshot(data, merge=True)
 
         elif kind == "status_change":
             status = str(data)
@@ -994,22 +1265,16 @@ class MainWindow(tk.Tk):
             self.lbl_stage.config(text=f"Trạng thái: {display_status}")
 
             if status == ProjectStatus.ANALYZING.value:
-                self.progress_var.set(25.0)
                 for item in self.tree.get_children():
                     if item.startswith("ep_") or item == "season":
                         self.tree.set(item, "stage", "Analyzing")
                         self.tree.set(item, "status", "Đang phân tích")
             elif status in (ProjectStatus.ANALYZED.value, ProjectStatus.JSON_READY.value):
-                self.progress_var.set(50.0)
                 for item in self.tree.get_children():
                     if item.startswith("ep_") or item == "season":
                         self.tree.set(item, "stage", "Evidence Complete")
                         self.tree.set(item, "progress", "100%")
                         self.tree.set(item, "status", "Hoàn tất")
-            elif status == ProjectStatus.RENDERING.value:
-                self.progress_var.set(75.0)
-            elif status == ProjectStatus.COMPLETED.value:
-                self.progress_var.set(100.0)
 
         elif kind == "final_json":
             if isinstance(data, dict):
@@ -1136,7 +1401,6 @@ class MainWindow(tk.Tk):
             proj_name = self.current_project_name or "Dự án"
 
             if status == ProjectStatus.COMPLETED.value:
-                self.progress_var.set(100.0)
                 msg = f"Đã hoàn thành toàn bộ dự án video recap thành công!"
                 self.status_var.set(msg)
                 self.banner.show(f"Đã hoàn thành toàn bộ dự án '{proj_name}' thành công!", level="success")
@@ -1153,6 +1417,12 @@ class MainWindow(tk.Tk):
                 self.banner.show("Tiến trình đã được dừng an toàn.", level="warning")
             elif status == ProjectStatus.FAILED.value:
                 err_text = data.get("error", "Tiến trình bị gián đoạn") if isinstance(data, dict) else "Lỗi"
+                if self._activity_snapshot.get("state") != ActivityState.FAILED.value:
+                    self._set_activity_snapshot({
+                        "state": ActivityState.FAILED.value, "active": False,
+                        "activity_text": "Workflow failed; prior progress was preserved.",
+                        "error": err_text,
+                    }, merge=True)
                 self.status_var.set(f"Lỗi: {err_text}")
                 self.banner.show(f"Lỗi: {err_text}", level="error")
                 if self.settings.notify_error:
@@ -1246,7 +1516,7 @@ class MainWindow(tk.Tk):
 
     def cancel_owned_after(self) -> None:
         """Cancel pending after() callbacks owned by this window."""
-        for job_attr in ("_poll_job", "_gpu_detect_job", "_close_job"):
+        for job_attr in ("_poll_job", "_gpu_detect_job", "_close_job", "_activity_timer_job"):
             job = getattr(self, job_attr, None)
             if job:
                 try:
