@@ -450,6 +450,8 @@ def test_settings_dialog_update_tab_wiring(tmp_path: Path):
 
         # Test Save persists update_repo
         dialog.var_update_repo.set("savedorg/savedrepo")
+        dialog.var_gw_sub_model.set("scanner-route")
+        dialog.var_gw_prime_model.set("finalizer-route")
         dialog._on_save()
 
         mgr = SettingsManager(persistence=persistence)

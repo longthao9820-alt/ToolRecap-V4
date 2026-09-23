@@ -96,6 +96,8 @@ def test_prompt_exact_whitespace_saves_twice(tmp_path: Path):
         dialog1.update_idletasks()
         dialog1.txt_prompt.delete("1.0", "end")
         dialog1.txt_prompt.insert("1.0", exact_prompt)
+        dialog1.var_gw_sub_model.set("scanner-route")
+        dialog1.var_gw_prime_model.set("finalizer-route")
 
         # Save once
         dialog1._on_save()
@@ -111,6 +113,8 @@ def test_prompt_exact_whitespace_saves_twice(tmp_path: Path):
         dialog2.update_idletasks()
         retrieved_text = dialog2.txt_prompt.get("1.0", "end-1c")
         assert retrieved_text == exact_prompt
+        dialog2.var_gw_sub_model.set("scanner-route")
+        dialog2.var_gw_prime_model.set("finalizer-route")
 
         # Save twice
         dialog2._on_save()
@@ -136,6 +140,8 @@ def test_thinking_disabled_in_settings_dialog(tmp_path: Path):
         # Thinking checkbutton state must be disabled
         assert str(dialog.chk_thinking["state"]) == "disabled"
         assert dialog.var_gw_thinking.get() is False
+        dialog.var_gw_sub_model.set("scanner-route")
+        dialog.var_gw_prime_model.set("finalizer-route")
 
         # Save settings and verify gateway_thinking is persisted as False
         dialog._on_save()

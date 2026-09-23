@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import queue
+from dataclasses import replace
 from pathlib import Path
 import sys
 import threading
@@ -1364,6 +1365,7 @@ class SettingsDialog(tk.Toplevel):
     # -------------------------------------------------------------------------
     def _on_save(self) -> None:
         """Validate all inputs and persist settings and DPAPI secrets."""
+        original_settings = self.settings
         try:
             # 1. Validate URLs
             gw_url = validate_url_no_credentials(self.var_gw_endpoint.get(), "Gateway Endpoint")
@@ -1401,6 +1403,7 @@ class SettingsDialog(tk.Toplevel):
                 raise ValueError("Tốc độ khung hình FPS phải nằm trong khoảng từ 1.0 đến 120.0.")
 
             # 3. Update AppSettings instance
+            self.settings = replace(self.settings)
             self.settings.recap_language = self.recap_language_var.get()
             self.settings.recap_mode = self.recap_mode_var.get()
             self.settings.content_type = self.content_type_var.get()
@@ -1461,6 +1464,7 @@ class SettingsDialog(tk.Toplevel):
             self.after(400, self.destroy)
 
         except Exception as e:
+            self.settings = original_settings
             safe_error = sanitize_message(
                 str(e),
                 [self.var_gw_key.get(), self.var_voice_key.get()],

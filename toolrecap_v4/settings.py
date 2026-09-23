@@ -61,6 +61,10 @@ class GatewaySettingsController:
 
     def save(self, base: AppSettings, form: GatewayFormValues, *, masked_placeholder: str) -> AppSettings:
         valid = self.validate(form)
+        if not valid.scanner_model:
+            raise ValueError("Scanner Model cannot be empty.")
+        if not valid.finalizer_model and not any((base.planner_model, base.writer_model, base.gateway_prime_model)):
+            raise ValueError("Finalizer Model cannot be empty.")
         updated = replace(base)
         updated.gateway_endpoint = valid.endpoint
         updated.scanner_model = updated.gateway_sub_model = updated.gateway_model = valid.scanner_model
@@ -96,13 +100,21 @@ class GatewaySettingsController:
         from toolrecap_v4.gateway import GatewayClient, sanitize_message
         valid = self.validate(form)
         model = valid.scanner_model if role == "scanner" else valid.finalizer_model
+        reasoning = valid.scanner_reasoning if role == "scanner" else valid.finalizer_reasoning
         if not model:
             return {"ok": False, "role": role, "model": "", "message": f"{role.title()} Model is not configured"}
         key = self.secret_store.get_secret("gateway_api_key") if valid.api_key == masked_placeholder else valid.api_key
         factory = self.gateway_factory or GatewayClient
         try:
             client = factory(base_url=valid.endpoint, api_key=key or None, timeout=8.0, max_retries=0)
-            client.validate_model_availability(model)
+            client.submit_text_chat(
+                prompt=f"Configuration diagnostic for {role}. Reply with OK.",
+                model=model,
+                reasoning_effort=reasoning or None,
+                stream=False,
+                expect_json=False,
+                phase=f"settings_test_{role}",
+            )
             return {"ok": True, "role": role, "model": model, "message": "Connection successful"}
         except Exception as exc:
             safe = sanitize_message(str(exc), [key])[:300]

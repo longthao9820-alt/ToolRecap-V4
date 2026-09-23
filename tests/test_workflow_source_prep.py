@@ -36,6 +36,7 @@ from toolrecap_v4.errors import (
 from toolrecap_v4.gateway import GatewayClient
 from toolrecap_v4.media import AudioStreamInfo, VideoStreamInfo
 from toolrecap_v4.persistence import ProjectPersistence
+from toolrecap_v4.settings import AppSettings
 from toolrecap_v4.workflow import (
     ProjectStatus,
     ProjectWorkflow,
@@ -479,6 +480,7 @@ def test_imported_final_json_zero_prep_and_zero_gateway(workflow_env: dict[str, 
         source_input=v1,
         final_json=final_json,
         output_dir=out_dir,
+        settings=AppSettings(scanner_model="changed-scan", vision_model="changed-vision", finalizer_model="changed-final", planner_model="changed-final", writer_model="changed-final"),
     )
 
     # Mock renderer voice adapter to avoid calling external TTS

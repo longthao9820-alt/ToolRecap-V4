@@ -312,6 +312,8 @@ def test_settings_dialog_masked_secrets_and_validation(tmp_path: Path):
 
         # Fix FPS and save valid
         dialog.var_canvas_fps.set(30.0)
+        dialog.var_gw_sub_model.set("scanner-route")
+        dialog.var_gw_prime_model.set("finalizer-route")
         dialog._on_save()
 
         # Ensure settings were saved

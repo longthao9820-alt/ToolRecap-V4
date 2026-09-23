@@ -12,7 +12,7 @@
 
 ## 1. Executive Summary & Scope
 
-This report documents the implementation and verification of **Phase 9** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`), validating independent Writer responses and producing the canonical schema 3.0 Final JSON.
+This report documents the implementation and closure verification of **Phase 10** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`), exposing the completed AI architecture through provider-neutral secure settings.
 
 ### Cumulative Progression:
 - **Phase 1 (Baseline Validated)**: Established independent V4 workspace with 215/215 tests passing, schema 3.0 immutable, Windows DPAPI secret persistence preserved.
@@ -177,7 +177,7 @@ All validation suites executed and passed cleanly:
   - Result: 100% clean compilation across all modules and tests, 0 syntax or compilation errors.
 - **Module Import Verification**:
   - Command: `pkgutil.walk_packages` across `toolrecap_v4`
-  - Result: All 73 current submodules cleanly imported without error after Phase 9.
+  - Result: All 73 current submodules cleanly imported without error after Phase 10.
 - **Full Pytest Suite**:
   - Command: `pytest --basetemp="C:\Users\Long\AppData\Local\Temp\kilo\pytest_v4_phase3_run"`
    - Phase 2 baseline: **237 passed**.
@@ -195,8 +195,8 @@ All validation suites executed and passed cleanly:
 - Phase 8 closure focused coverage: **20 targeted Writer context/integrity/execution/cache/response-boundary tests** plus updated workflow/bypass assertions.
 - Phase 9 closure full suite: **526 passed in 67.39s**, 0 failures, 0 errors, 0 skipped.
 - Phase 9 focused coverage: **25 validation/repair/mapping/revision/zero-output tests** plus updated workflow/bypass assertions.
-- Phase 10 final full suite: **541 passed in 72.60s**, 0 failures, 0 errors, 0 skipped.
-- Phase 10 settings/UI focused suite: **39 passed**, including 15 new secure migration/diagnostic/controller tests.
+- Phase 10 closure full suite: **550 passed in 64.97s**, 0 failures, 0 errors, 0 skipped (short Windows-safe isolated basetemp).
+- Phase 10 settings/UI focused suite: **48 passed**, including secure migration, transactional rollback, diagnostics, dependency boundaries and real-Tk interaction tests.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
   - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
@@ -263,4 +263,4 @@ All validation suites executed and passed cleanly:
 - **Output Writers**: IMPLEMENTED in Phase 8 as independent response-capture jobs.
 - **Executable Packaging**: Portable binary packaging via `build_portable.py` / PyInstaller was not run; no `dist/ToolRecapV4.exe` exists in this phase.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.
-- **Git state**: Phase 1–8 history is preserved; Phase 9 is committed separately. No remote or push is configured.
+- **Git state**: Phase 1–9 history and Phase 10 implementation commit `cbe26e8` are preserved; closure corrections are committed separately. No remote or push is configured.
