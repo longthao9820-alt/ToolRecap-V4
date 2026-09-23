@@ -17,7 +17,11 @@ def make_plan(outputs):
     return SeasonPlan(**{**p.__dict__,"plan_hash":h})
 def output(oid="out_001",eids=None,vids=None,eps=None):return {"output_id":oid,"planner_ref":"draft_output_001","title_concept":"Secondary arc","editorial_thesis":"Small stories matter","story_arc":"Cross episode","episode_ids":eps or ["E01","E02"],"evidence_ids":eids if eids is not None else ["E01-EV-001","E01-EV-002"],"visual_evidence_ids":vids or [],"source_ranges":[{"episode_id":"E01","start_ms":1000,"end_ms":3000}],"uncertainty":["Identity uncertain"],"writer_brief":{"tone":"thoughtful"}}
 def setup(tmp_path,outputs=None,visuals=()):
-    store,rev,episodes,_=populated_store(tmp_path);plan=make_plan(outputs if outputs is not None else [output()]);visual=VisualRunResult("vis-1",(),tuple(visuals),{"complete":True},0,0);return store,episodes,plan,visual
+    store,rev,episodes,_=populated_store(tmp_path);plan=make_plan(outputs if outputs is not None else [output()]);visual=VisualRunResult("vis-1",(),tuple(visuals),{"complete":True},0,0)
+    import hashlib
+    plan_dir=tmp_path/"projects"/"project-1"/"plans"/"plan-test";plan_dir.mkdir(parents=True,exist_ok=True);plan_data=plan.to_dict();(plan_dir/"season_plan.json").write_text(json.dumps(plan_data),encoding="utf-8");(plan_dir/"manifest.json").write_text(json.dumps({"status":"LOCKED","plan_hash":plan.plan_hash,"artifact_hash":hashlib.sha256(json.dumps(plan_data,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest()}),encoding="utf-8")
+    visual_dir=tmp_path/"projects"/"project-1"/"visual"/"vis-1";visual_dir.mkdir(parents=True,exist_ok=True);visual_data={"visual_revision":"vis-1","requests":[],"evidence":[v.to_dict() for v in visuals],"completeness":visual.completeness};(visual_dir/"visual_evidence.json").write_text(json.dumps(visual_data),encoding="utf-8");(visual_dir/"manifest.json").write_text(json.dumps({"status":"COMPLETE","data_hash":hashlib.sha256(json.dumps(visual_data,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest()}),encoding="utf-8")
+    return store,episodes,plan,visual
 class Gateway:
     def __init__(self,delay=False,fail=None):self.calls=[];self.active=0;self.max_active=0;self.lock=threading.Lock();self.delay=delay;self.fail=fail
     def submit_text_chat(self,**kw):
@@ -38,7 +42,7 @@ def test_writer_context_is_complete_verbatim_and_path_safe(tmp_path):
 
 def test_visual_context_has_observations_not_frame_bytes(tmp_path):
     v=VisualEvidence("E01-VIS-001","project-1","E01","src_shared","VR-E01-001",1000,2000,("E01-FR-0001",),(1000,),"A person enters.",(),("door",),(),("identity uncertain",),("E01-EV-001",),{"frame_hashes":["abc"]})
-    store,episodes,_,visual=setup(tmp_path,visuals=(v,));plan=make_plan([output(vids=["E01-VIS-001"])])
+    store,episodes,plan,visual=setup(tmp_path,outputs=[output(vids=["E01-VIS-001"])],visuals=(v,))
     c=assemble_writer_jobs(project_id="project-1",raw_prompt="p",language="en",plan=plan,episodes=episodes,evidence_store=store,visual=visual,model="m",reasoning="")[0].context
     assert c["authoritative_visual_evidence"][0]["observation"]=="A person enters."
     assert "image" not in json.dumps(c).lower() and "frame bytes" not in json.dumps(c).lower()
@@ -85,8 +89,8 @@ def test_writer_model_and_prompt_change_invalidate_but_downstream_settings_are_a
     for irrelevant in ("voicestudio","audio_mix","renderer_gpu","output_directory","publication"):assert irrelevant not in text
 
 def test_zero_outputs_and_capacity(tmp_path):
-    store,episodes,_,visual=setup(tmp_path);plan=make_plan([]);gw=Gateway();r=WriterService(gw,tmp_path,WriterConfig("model-name-does-not-imply-capacity")).run(project_id="project-1",raw_prompt="p",language="en",plan=plan,episodes=episodes,visual=visual);assert not gw.calls and r.manifest["status"]=="COMPLETE"
-    plan=make_plan([output(eids=["E01-EV-001"])]);with_service=WriterService(gw,tmp_path,WriterConfig("m",max_request_bytes=1024))
+    store,episodes,plan,visual=setup(tmp_path,outputs=[]);gw=Gateway();r=WriterService(gw,tmp_path,WriterConfig("model-name-does-not-imply-capacity")).run(project_id="project-1",raw_prompt="p",language="en",plan=plan,episodes=episodes,visual=visual);assert not gw.calls and r.manifest["status"]=="COMPLETE"
+    other=tmp_path/"capacity";store,episodes,plan,visual=setup(other,outputs=[output(eids=["E01-EV-001"])]);with_service=WriterService(gw,other,WriterConfig("m",max_request_bytes=1024))
     with pytest.raises(WriterTransportError):with_service.run(project_id="project-1",raw_prompt="p",language="en",plan=plan,episodes=episodes,visual=visual)
     assert len(gw.calls)==0
 

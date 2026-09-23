@@ -12,7 +12,7 @@
 
 ## 1. Executive Summary & Scope
 
-This report documents the implementation and closure verification of **Phase 7** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`), adding selective Planner-requested scene Vision and the immutable Season Plan lock.
+This report documents the implementation and closure verification of **Phase 8** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`), adding independent per-output Writers over the immutable locked Season Plan.
 
 ### Cumulative Progression:
 - **Phase 1 (Baseline Validated)**: Established independent V4 workspace with 215/215 tests passing, schema 3.0 immutable, Windows DPAPI secret persistence preserved.
@@ -166,8 +166,8 @@ All validation suites executed and passed cleanly:
 - Phase 6 focused coverage: **35 Planner protocol/fetch/service tests**, two Planner settings tests, and updated workflow boundary/bypass assertions.
 - Phase 7 closure full suite: **481 passed in 53.68s**, 0 failures, 0 errors, 0 skipped.
 - Phase 7 focused coverage: **28 targeted visual request/frame/Vision/cache/plan-lock tests** plus updated workflow assertions.
-- Phase 8 final full suite: **496 passed in 58.15s**, 0 failures, 0 errors, 0 skipped.
-- Phase 8 focused coverage: **15 independent Writer context/execution/cache/response-boundary tests** plus updated workflow/bypass assertions.
+- Phase 8 closure full suite: **501 passed in 68.99s**, 0 failures, 0 errors, 0 skipped.
+- Phase 8 closure focused coverage: **20 targeted Writer context/integrity/execution/cache/response-boundary tests** plus updated workflow/bypass assertions.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
   - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
@@ -229,7 +229,9 @@ All validation suites executed and passed cleanly:
 
 - **General scene Vision boundary**: Selective Planner-requested still-image Vision is implemented in Phase 7. Full-episode/season scans, video upload and arbitrary sampling remain prohibited.
 - **Writer validation/repair and Final JSON**: NOT implemented. Phase 8 captures Writer responses and draft parse status only; Phase 9 owns semantic validation, AI repair, deterministic merge and production Final JSON.
-- **Output Writers & Output Directory Resolver**: NOT implemented. Final JSON generation currently only accepts imported/pre-existing schemas.
+- **Output Writers**: IMPLEMENTED in Phase 8 as independent response-capture jobs.
+- **Phase 9 validation/repair/merge and production Final JSON**: NOT implemented.
+- **Output Directory Resolver**: NOT implemented; remains later scope.
 - **Executable Packaging**: Portable binary packaging via `build_portable.py` / PyInstaller was not run; no `dist/ToolRecapV4.exe` exists in this phase.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.
 - **Git state**: Phase 7 implementation commit `b4eb214` is preserved; closure corrections are committed separately. No remote or push is configured.

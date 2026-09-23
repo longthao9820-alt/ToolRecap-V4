@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib,json
 from typing import Any,Sequence
+from pathlib import Path
 from toolrecap_v4.analysis.evidence_store import EvidenceStore
 from toolrecap_v4.analysis.finalizer.season_plan import SeasonPlan
 from toolrecap_v4.analysis.models import PreparedEpisode
@@ -31,6 +32,22 @@ def validate_locked_plan(plan:SeasonPlan)->None:
     if plan.plan_version!="season-plan-v1" or plan.plan_hash!=_digest(plan.semantic_dict()):raise WriterRevisionError("Season Plan hash/version mismatch")
     ids=[o.get("output_id") for o in plan.outputs]
     if len(ids)!=len(set(ids)) or ids!=[f"out_{i:03d}" for i in range(1,len(ids)+1)]:raise WriterRevisionError("Season Plan canonical output identities/order are invalid")
+
+def verify_locked_plan_artifact(root,plan:SeasonPlan)->None:
+    root=Path(root)/"projects"/plan.project_id/"plans"
+    for path in root.glob("*/season_plan.json") if root.exists() else ():
+        try:
+            data=json.loads(path.read_text());manifest=json.loads((path.parent/"manifest.json").read_text())
+            if data.get("plan_hash")==plan.plan_hash and data==plan.to_dict() and manifest.get("status")=="LOCKED" and manifest.get("plan_hash")==plan.plan_hash and manifest.get("artifact_hash")==_digest(data):return
+        except Exception:continue
+    raise WriterRevisionError("Season Plan is not backed by a matching LOCKED artifact")
+
+def verify_visual_artifact(root,project_id:str,visual:VisualRunResult)->None:
+    base=Path(root)/"projects"/project_id/"visual"/visual.visual_revision;data_path=base/"visual_evidence.json";manifest_path=base/"manifest.json"
+    try:data=json.loads(data_path.read_text());manifest=json.loads(manifest_path.read_text())
+    except Exception as exc:raise WriterVisualEvidenceError("Active Visual Evidence artifact is missing/corrupt") from exc
+    if manifest.get("status")!="COMPLETE" or manifest.get("data_hash")!=_digest(data) or data.get("visual_revision")!=visual.visual_revision:raise WriterVisualEvidenceError("Visual Evidence artifact integrity/revision mismatch")
+    if data.get("evidence")!=[item.to_dict() for item in visual.evidence] or data.get("completeness")!=visual.completeness:raise WriterVisualEvidenceError("Visual Evidence input differs from authoritative artifact")
 
 def assemble_writer_jobs(*,project_id:str,raw_prompt:str,language:str,plan:SeasonPlan,episodes:Sequence[PreparedEpisode],evidence_store:EvidenceStore,visual:VisualRunResult,model:str,reasoning:str)->tuple[WriterJob,...]:
     validate_locked_plan(plan)

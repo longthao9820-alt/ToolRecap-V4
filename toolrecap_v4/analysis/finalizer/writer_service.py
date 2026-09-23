@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any,Sequence
 from toolrecap_v4.analysis.evidence_store import EvidenceStore
 from toolrecap_v4.analysis.finalizer.season_plan import SeasonPlan
-from toolrecap_v4.analysis.finalizer.writer import WRITER_SYSTEM_PROMPT,WriterArtifact,WriterRunResult,assemble_writer_jobs,best_effort_extract,build_writer_prompt
+from toolrecap_v4.analysis.finalizer.writer import WRITER_SYSTEM_PROMPT,WriterArtifact,WriterRunResult,assemble_writer_jobs,best_effort_extract,build_writer_prompt,verify_locked_plan_artifact,verify_visual_artifact
 from toolrecap_v4.analysis.finalizer.writer_store import WriterStore
 from toolrecap_v4.analysis.models import PreparedEpisode
 from toolrecap_v4.analysis.scanner.prompts import measure_text_request_bytes
@@ -39,6 +39,7 @@ class WriterService:
         state,parsed=best_effort_extract(r.raw_response)
         return store.save(job,r.raw_response,state,parsed,r.bytes_sent,measurement,self.config.max_response_bytes,token),False
     def run(self,*,project_id:str,raw_prompt:str,language:str,plan:SeasonPlan,episodes:Sequence[PreparedEpisode],visual:VisualRunResult,cancellation_token:CancellationToken|None=None)->WriterRunResult:
+        verify_locked_plan_artifact(self.root,plan);verify_visual_artifact(self.root,project_id,visual)
         jobs=assemble_writer_jobs(project_id=project_id,raw_prompt=raw_prompt,language=language,plan=plan,episodes=episodes,evidence_store=EvidenceStore(self.root,project_id),visual=visual,model=self.config.model,reasoning=self.config.reasoning);store=WriterStore(self.root,project_id,plan.plan_hash);artifacts={};failures={};reused=requested=0
         if not jobs:return WriterRunResult(plan.plan_hash,(),store.save_project_manifest(plan.plan_hash,[],{},{}),0,0)
         iterator=iter(jobs)
