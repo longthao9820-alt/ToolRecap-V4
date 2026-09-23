@@ -44,6 +44,7 @@ from toolrecap_v4.discovery import (
     is_windows_reserved_stem,
     natural_sort_key,
 )
+from toolrecap_v4.downstream import DownstreamVoiceCache
 from toolrecap_v4.errors import (
     AnalysisPipelineUnavailableError,
     CancelledError,
@@ -1019,15 +1020,23 @@ class ProjectWorkflow:
                 state["status"]=ProjectStatus.FINAL_JSON_READY.value;state["final_json"]=finalized.final_json;state["finalization"]=final_summary;state["error"]=phase10_msg;state.setdefault("timestamps",{})["final_json_ready_at"]=now_f;state["timestamps"]["updated_at"]=now_f;self.persistence.save_project(state)
                 if callbacks and callbacks.on_final_json_ready:callbacks.on_final_json_ready(final_summary)
                 if callbacks and callbacks.on_status_change:callbacks.on_status_change(ProjectStatus.FINAL_JSON_READY.value)
-                phase10_err=AnalysisPipelineUnavailableError(phase10_msg)
-                if callbacks and callbacks.on_error:callbacks.on_error(phase10_err,None)
-                raise phase10_err
+                # Phase 11 boundary: canonical Final JSON is now the sole
+                # downstream authority and enters the same path as imports.
+                final_json = finalized.final_json
 
             # Step 2: Source integrity check (source changes fail no substitution)
             verify_source_integrity(state["source_fingerprints"], cancellation_token=cancellation_token)
 
             # Step 3: Resolve settings and output directory
             cfg = settings or AppSettings.from_dict(state.get("settings_snapshot", {}))
+            source_durations = {
+                item["source_file"]: int(item.get("duration_ms", 0))
+                for item in state.get("sources", [])
+            }
+            validate_project(final_json, source_durations=source_durations, cancellation_token=cancellation_token)
+            final_json_hash = hashlib.sha256(
+                json.dumps(final_json, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
             if output_dir is not None:
                 resolved_output_dir = Path(output_dir).resolve()
                 resolved_output_dir.mkdir(parents=True, exist_ok=True)
@@ -1120,12 +1129,21 @@ class ProjectWorkflow:
                 self.persistence.save_project(state)
 
                 try:
+                    voice_cache = DownstreamVoiceCache(self.persistence.root, project_id)
+                    voice_result = voice_cache.prepare_output(
+                        output_def=out_def,
+                        final_json_hash=final_json_hash,
+                        settings=cfg,
+                        voice_adapter=self.voice_adapter,
+                        cancellation_token=cancellation_token,
+                    )
                     render_res = render_output(
                         output_def=out_def,
                         source_paths=source_paths_mapping,
                         output_dir=resolved_output_dir,
                         settings=cfg,
                         voice_adapter=self.voice_adapter,
+                        narration_audio_map=voice_result.narration_audio_map,
                         cancellation_token=cancellation_token,
                     )
                 except CancelledError:

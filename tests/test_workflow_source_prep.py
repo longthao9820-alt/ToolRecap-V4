@@ -15,6 +15,7 @@ Invariants verified:
 from __future__ import annotations
 
 import io
+import wave
 from pathlib import Path
 import subprocess
 from typing import Any, Dict, List, Optional
@@ -438,6 +439,11 @@ def test_imported_final_json_zero_prep_and_zero_gateway(workflow_env: dict[str, 
     mock_writer.run.side_effect = AssertionError("Writer must not run for imported Final JSON")
     mock_finalizer = MagicMock()
     mock_finalizer.run.side_effect = AssertionError("Phase 9 finalizer must not run for imported Final JSON")
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, "wb") as wav:
+        wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(8000); wav.writeframes(b"\x00\x00" * 800)
+    mock_voice = MagicMock()
+    mock_voice.synthesize.return_value = wav_buffer.getvalue()
     workflow = ProjectWorkflow(
         persistence=storage,
         gateway_client=mock_gw,
@@ -446,6 +452,7 @@ def test_imported_final_json_zero_prep_and_zero_gateway(workflow_env: dict[str, 
         planner_service=mock_planner,
         writer_service=mock_writer,
         finalization_service=mock_finalizer,
+        voice_adapter=mock_voice,
     )
 
     project_id = "proj-import-zero-prep-01"
@@ -502,6 +509,7 @@ def test_imported_final_json_zero_prep_and_zero_gateway(workflow_env: dict[str, 
         mp.setattr("toolrecap_v4.workflow.compute_file_sha256", lambda p: "fake_hash")
 
         res_state = workflow.start_project(project_id)
+        retry_state = workflow.retry_project(project_id)
 
     # Source prep pipeline was NEVER called
     assert mock_pipeline.prepare_episode.call_count == 0
@@ -512,6 +520,8 @@ def test_imported_final_json_zero_prep_and_zero_gateway(workflow_env: dict[str, 
     assert mock_planner.run.call_count == 0
     assert mock_writer.run.call_count == 0
     assert mock_finalizer.run.call_count == 0
+    assert mock_voice.synthesize.call_count == 1
+    assert retry_state["status"] == ProjectStatus.COMPLETED.value
 
     # Project reached COMPLETED status
     assert res_state["status"] == ProjectStatus.COMPLETED.value

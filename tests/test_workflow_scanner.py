@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import io
+import wave
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -47,7 +49,7 @@ class Gateway:
         return GatewayResult(raw_response=raw, bytes_sent=1234, metadata={"status_code": 200, "duration_ms": 2})
 
 
-def test_workflow_reaches_catalog_ready_and_stops_before_phase6(tmp_path):
+def test_workflow_reaches_catalog_ready_and_stops_before_phase6(tmp_path, monkeypatch):
     source = tmp_path / "episode01.mkv"
     source.write_bytes(b"synthetic source")
     fingerprint = compute_file_fingerprint(source)
@@ -117,7 +119,7 @@ def test_workflow_reaches_catalog_ready_and_stops_before_phase6(tmp_path):
     planner = PlannerStub()
     workflow.planner_service = planner
     workflow.visual_service = SimpleNamespace(run=lambda **kwargs: SimpleNamespace(visual_revision="vis-stub", evidence=(), completeness={"complete": True, "failed": 0, "canceled": 0}))
-    workflow.season_plan_service = SimpleNamespace(run=lambda **kwargs: SimpleNamespace(plan=SimpleNamespace(plan_hash="plan-hash", outputs=()), path=tmp_path / "season_plan.json", reused=False))
+    workflow.season_plan_service = SimpleNamespace(run=lambda **kwargs: SimpleNamespace(plan=SimpleNamespace(plan_hash="plan-hash", outputs=({"output_id":"out_001"},)), path=tmp_path / "season_plan.json", reused=False))
     with pytest.raises(AnalysisPipelineUnavailableError, match="Phase 8"):
         workflow.resume_project("project-1")
     planned = persistence.load_project("project-1")
@@ -126,10 +128,30 @@ def test_workflow_reaches_catalog_ready_and_stops_before_phase6(tmp_path):
     assert planned["season_plan"]["plan_hash"] == "plan-hash"
     assert planner.calls[0]["raw_recap_prompt"] == "THIS CREATIVE PROMPT MUST NEVER ENTER SCANNER"
     assert planner.calls[0]["catalog"].catalog_hash == planned["catalog"]["catalog_hash"]
-    workflow.writer_service = SimpleNamespace(run=lambda **kwargs: SimpleNamespace(artifacts=(), reused_count=0, requested_count=0))
-    workflow.finalization_service = SimpleNamespace(run=lambda **kwargs: SimpleNamespace(revision="final-stub",artifact_hash="final-hash",final_json={"schema_version":"3.0","project_id":"project-1","project_name":"Project","sources":[],"outputs":[]},repaired_output_ids=(),reused=False))
-    with pytest.raises(AnalysisPipelineUnavailableError, match="Phase 10"):
-        workflow.resume_project("project-1")
-    final_state=persistence.load_project("project-1")
-    assert final_state["status"]==ProjectStatus.FINAL_JSON_READY.value
-    assert final_state["writer_drafts"]["expected_output_count"]==0
+    workflow.writer_service = SimpleNamespace(run=lambda **kwargs: SimpleNamespace(artifacts=(object(),), reused_count=0, requested_count=1))
+    final_json={"schema_version":"3.0","project_id":"project-1","project_name":"Project","sources":[{"source_file":"episode01.mkv","duration_ms":10000}],"outputs":[{"render_id":"out_001","title":"Generated_Output","segments":[{"segment_id":"seg-001","source_file":"episode01.mkv","start_ms":1000,"end_ms":3000,"type":"narration","narration":"Spoken narration.","source_audio":False,"subtitles":[]}]}]}
+    def finalize(**kwargs):
+        persistence.save_final_json("project-1",final_json)
+        return SimpleNamespace(revision="final-stub",artifact_hash="final-hash",final_json=final_json,repaired_output_ids=(),reused=False)
+    workflow.finalization_service = SimpleNamespace(run=finalize)
+    def wav_bytes():
+        buf=io.BytesIO()
+        with wave.open(buf,"wb") as wav:wav.setnchannels(1);wav.setsampwidth(2);wav.setframerate(8000);wav.writeframes(b"\x00\x00"*800)
+        return buf.getvalue()
+    class Voice:
+        calls=0
+        def synthesize(self,*args,**kwargs):
+            assert persistence.has_final_json("project-1")
+            self.calls+=1;return wav_bytes()
+    voice=Voice();workflow.voice_adapter=voice
+    def fake_render(**kwargs):
+        out=tmp_path/"out"/"Generated_Output.mp4";out.parent.mkdir(parents=True,exist_ok=True);out.write_bytes(b"rendered")
+        return SimpleNamespace(output_path=out,narration_srt_path=tmp_path/"out"/"Generated_Output.narration.srt",original_srt_path=tmp_path/"out"/"Generated_Output.original.srt",duration=2.0,video_codec="h264",audio_codec="aac",width=640,height=480,fps=25.0)
+    monkeypatch.setattr("toolrecap_v4.workflow.render_output",fake_render)
+    final_state=workflow.resume_project("project-1")
+    assert final_state["status"]==ProjectStatus.COMPLETED.value
+    assert final_state["writer_drafts"]["expected_output_count"]==1
+    assert voice.calls==1
+    gateway_calls=len(gateway.calls)
+    retried=workflow.retry_project("project-1")
+    assert retried["status"]==ProjectStatus.COMPLETED.value and voice.calls==1 and len(gateway.calls)==gateway_calls
