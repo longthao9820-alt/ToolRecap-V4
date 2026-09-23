@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -115,10 +116,13 @@ def test_workflow_reaches_catalog_ready_and_stops_before_phase6(tmp_path):
 
     planner = PlannerStub()
     workflow.planner_service = planner
-    with pytest.raises(AnalysisPipelineUnavailableError, match="Phase 7"):
+    workflow.visual_service = SimpleNamespace(run=lambda **kwargs: SimpleNamespace(visual_revision="vis-stub", evidence=(), completeness={"complete": True, "failed": 0, "canceled": 0}))
+    workflow.season_plan_service = SimpleNamespace(run=lambda **kwargs: SimpleNamespace(plan=SimpleNamespace(plan_hash="plan-hash", outputs=()), path=tmp_path / "season_plan.json", reused=False))
+    with pytest.raises(AnalysisPipelineUnavailableError, match="Phase 8"):
         workflow.resume_project("project-1")
     planned = persistence.load_project("project-1")
-    assert planned["status"] == ProjectStatus.PLANNER_DRAFT_READY.value
+    assert planned["status"] == ProjectStatus.SEASON_PLAN_READY.value
     assert planned["planner_draft"]["proposed_output_count"] == 0
+    assert planned["season_plan"]["plan_hash"] == "plan-hash"
     assert planner.calls[0]["raw_recap_prompt"] == "THIS CREATIVE PROMPT MUST NEVER ENTER SCANNER"
     assert planner.calls[0]["catalog"].catalog_hash == planned["catalog"]["catalog_hash"]

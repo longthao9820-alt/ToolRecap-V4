@@ -31,6 +31,7 @@ from .planner import (
     validate_planner_action,
 )
 from .planner_service import PlannerConfig, PlannerRunResult, PlannerService
+from .season_plan import SeasonPlan, SeasonPlanResult, SeasonPlanService
 
 __all__ = [
     "CATALOG_PROJECTION_VERSION",
@@ -56,6 +57,9 @@ __all__ = [
     "PlannerDraft",
     "PlannerRunResult",
     "PlannerService",
+    "SeasonPlan",
+    "SeasonPlanResult",
+    "SeasonPlanService",
     "SeasonEvidenceCatalog",
     "canonical_catalog_bytes",
     "catalog_detail_hash",

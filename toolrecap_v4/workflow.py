@@ -30,7 +30,8 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from toolrecap_v4.analysis.cache import AnalysisCacheManager
-from toolrecap_v4.analysis.finalizer import CatalogService, PlannerConfig, PlannerService
+from toolrecap_v4.analysis.finalizer import CatalogService, PlannerConfig, PlannerService, SeasonPlanService
+from toolrecap_v4.analysis.vision import FrameExtractionPolicy, VisionConfig, VisualEvidenceService
 from toolrecap_v4.analysis.models import PreparedEpisode
 from toolrecap_v4.analysis.scanner import ScannerChunkPolicy, ScannerConfig, ScannerService
 from toolrecap_v4.analysis.source_prep.pipeline import SourcePreparationPipeline
@@ -82,6 +83,7 @@ class ProjectStatus(str, enum.Enum):
     EVIDENCE_READY = "evidence_ready"
     CATALOG_READY = "catalog_ready"
     PLANNER_DRAFT_READY = "planner_draft_ready"
+    SEASON_PLAN_READY = "season_plan_ready"
     RENDERING = "rendering"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -124,6 +126,7 @@ class WorkflowCallbacks:
     on_evidence_ready: Optional[Callable[[str, Dict[str, int]], None]] = None
     on_catalog_ready: Optional[Callable[[str, Dict[str, Any]], None]] = None
     on_planner_draft_ready: Optional[Callable[[str, Dict[str, Any]], None]] = None
+    on_season_plan_ready: Optional[Callable[[str, Dict[str, Any]], None]] = None
 
 
 def resolve_sources(
@@ -330,7 +333,11 @@ def reconcile_project_state(
                 except PersistenceError:
                     planner_checkpoint = None
                 if planner_checkpoint and planner_checkpoint.get("status") == "completed":
-                    project_state["status"] = ProjectStatus.PLANNER_DRAFT_READY.value
+                    try:
+                        plan_checkpoint = persistence.load_checkpoint(project_id, "season_plan")
+                    except PersistenceError:
+                        plan_checkpoint = None
+                    project_state["status"] = ProjectStatus.SEASON_PLAN_READY.value if plan_checkpoint and plan_checkpoint.get("status") == "completed" else ProjectStatus.PLANNER_DRAFT_READY.value
                 else:
                     project_state["status"] = ProjectStatus.CATALOG_READY.value
             elif evidence_checkpoint and evidence_checkpoint.get("status") == "completed":
@@ -361,6 +368,8 @@ class ProjectWorkflow:
         scanner_service: Optional[ScannerService] = None,
         catalog_service: Optional[CatalogService] = None,
         planner_service: Optional[PlannerService] = None,
+        visual_service: Optional[VisualEvidenceService] = None,
+        season_plan_service: Optional[SeasonPlanService] = None,
     ) -> None:
         self.persistence = persistence or ProjectPersistence(storage_root=storage_root)
         self.settings_manager = settings_manager or SettingsManager(persistence=self.persistence)
@@ -370,6 +379,8 @@ class ProjectWorkflow:
         self.scanner_service = scanner_service
         self.catalog_service = catalog_service
         self.planner_service = planner_service
+        self.visual_service = visual_service
+        self.season_plan_service = season_plan_service
 
     def create_project(
         self,
@@ -952,10 +963,31 @@ class ProjectWorkflow:
                     callbacks.on_planner_draft_ready(planner_result.session_id, draft_summary)
                 if callbacks and callbacks.on_status_change:
                     callbacks.on_status_change(ProjectStatus.PLANNER_DRAFT_READY.value)
-                phase7_err = AnalysisPipelineUnavailableError(phase7_msg)
-                if callbacks and callbacks.on_error:
-                    callbacks.on_error(phase7_err, None)
-                raise phase7_err
+                has_visual = any(o.visual_requests for o in planner_result.draft.proposed_outputs)
+                visual_service = self.visual_service
+                if visual_service is None and (cfg.vision_model.strip() or not has_visual):
+                    visual_service = VisualEvidenceService(
+                        self.gateway_client, self.persistence.root,
+                        VisionConfig(cfg.vision_model, cfg.vision_reasoning, cfg.vision_repair_attempts,
+                            FrameExtractionPolicy(cfg.vision_frames_per_range,cfg.vision_frames_per_episode,cfg.vision_hard_frame_cap)),
+                    )
+                if visual_service is None:
+                    phase7_err = AnalysisPipelineUnavailableError(phase7_msg + " Vision model is not configured.")
+                    if callbacks and callbacks.on_error: callbacks.on_error(phase7_err,None)
+                    raise phase7_err
+                planner_draft_hash = hashlib.sha256(json.dumps(planner_result.draft.to_dict(),ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+                visual_result = visual_service.run(project_id=project_id,draft=planner_result.draft,planner_draft_hash=planner_draft_hash,episodes=prepared_models,evidence_revision=evidence_result.evidence_revision,cancellation_token=cancellation_token)
+                plan_service = self.season_plan_service or SeasonPlanService(self.gateway_client,self.persistence.root,cfg.planner_model,cfg.planner_reasoning)
+                plan_result = plan_service.run(project_id=project_id,raw_recap_prompt=state.get("prompt",""),catalog=catalog_result.catalog,draft=planner_result.draft,visual=visual_result,cancellation_token=cancellation_token)
+                plan_summary={"status":"completed","plan_hash":plan_result.plan.plan_hash,"visual_revision":visual_result.visual_revision,"output_count":len(plan_result.plan.outputs),"season_plan_path":str(plan_result.path),"reused":plan_result.reused,"completed_at":datetime.now(timezone.utc).isoformat()}
+                self.persistence.save_checkpoint(project_id,"season_plan",plan_summary)
+                now_plan=datetime.now(timezone.utc).isoformat();phase8_msg="Analysis pipeline stopped: locked Season Plan is ready (SEASON_PLAN_READY); Phase 8 Output Writers are not implemented."
+                state["status"]=ProjectStatus.SEASON_PLAN_READY.value;state["season_plan"]=plan_summary;state["error"]=phase8_msg;state.setdefault("timestamps",{})["season_plan_ready_at"]=now_plan;state["timestamps"]["updated_at"]=now_plan;self.persistence.save_project(state)
+                if callbacks and callbacks.on_season_plan_ready:callbacks.on_season_plan_ready(plan_result.plan.plan_hash,plan_summary)
+                if callbacks and callbacks.on_status_change:callbacks.on_status_change(ProjectStatus.SEASON_PLAN_READY.value)
+                phase8_err=AnalysisPipelineUnavailableError(phase8_msg)
+                if callbacks and callbacks.on_error:callbacks.on_error(phase8_err,None)
+                raise phase8_err
 
             # Step 2: Source integrity check (source changes fail no substitution)
             verify_source_integrity(state["source_fingerprints"], cancellation_token=cancellation_token)

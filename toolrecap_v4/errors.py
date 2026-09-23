@@ -220,6 +220,24 @@ class PlannerSessionError(PlannerError):
     """Raised for Planner checkpoint persistence or resume failures."""
 
 
+class VisualEvidenceError(ToolRecapError):
+    """Base exception for selective visual evidence failures."""
+
+
+class VisualRequestError(VisualEvidenceError): pass
+class FrameExtractionError(VisualEvidenceError): pass
+class FrameBudgetError(VisualEvidenceError): pass
+class VisionResponseError(VisualEvidenceError): pass
+class VisionValidationError(VisionResponseError): pass
+class VisionRepairExhaustedError(VisualEvidenceError): pass
+class VisualStoreError(VisualEvidenceError): pass
+
+
+class SeasonPlanError(ToolRecapError): pass
+class FinalPlannerValidationError(SeasonPlanError): pass
+class SeasonPlanLockError(SeasonPlanError): pass
+
+
 class CancelledError(ToolRecapError):
     """Raised when an operation is cancelled."""
 

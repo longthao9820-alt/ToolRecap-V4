@@ -1409,6 +1409,8 @@ class SettingsDialog(tk.Toplevel):
             # literal provider-neutral route into the factual Scanner fields.
             self.settings.scanner_model = self.settings.gateway_sub_model
             self.settings.scanner_reasoning = self.settings.gateway_sub_reasoning
+            self.settings.vision_model = self.settings.gateway_sub_model
+            self.settings.vision_reasoning = self.settings.gateway_sub_reasoning
             self.settings.gateway_prime_model = self.var_gw_prime_model.get().strip()
             self.settings.gateway_prime_reasoning = self.var_gw_prime_reasoning.get().strip()
             self.settings.planner_model = self.settings.gateway_prime_model

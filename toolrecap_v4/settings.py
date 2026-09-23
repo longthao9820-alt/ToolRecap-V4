@@ -76,6 +76,14 @@ class AppSettings:
     planner_repair_attempts: int = 1
     planner_max_request_bytes: int | None = None
 
+    # Phase 7 selective general still-image Vision.
+    vision_model: str = ""
+    vision_reasoning: str = ""
+    vision_frames_per_range: int = 6
+    vision_frames_per_episode: int = 24
+    vision_hard_frame_cap: int = 256
+    vision_repair_attempts: int = 1
+
     # Notifications (all defaults ON)
     notify_complete: bool = True
     notify_error: bool = True
@@ -116,6 +124,10 @@ class AppSettings:
             raise ValueError("planner_repair_attempts must be non-negative")
         if self.planner_max_request_bytes is not None and self.planner_max_request_bytes < 1024:
             raise ValueError("planner_max_request_bytes must be null or at least 1024")
+        if min(self.vision_frames_per_range, self.vision_frames_per_episode, self.vision_hard_frame_cap) < 1:
+            raise ValueError("Vision frame budgets must be positive")
+        if self.vision_repair_attempts < 0:
+            raise ValueError("vision_repair_attempts must be non-negative")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert settings to dictionary."""
@@ -135,6 +147,8 @@ class AppSettings:
             data_copy["planner_model"] = str(data_copy.get("gateway_prime_model") or "")
         if "planner_reasoning" not in data_copy:
             data_copy["planner_reasoning"] = str(data_copy.get("gateway_prime_reasoning") or "")
+        if "vision_model" not in data_copy:
+            data_copy["vision_model"] = str(data_copy.get("scanner_model") or data_copy.get("gateway_sub_model") or "")
         # Migrate legacy single gateway_model to dual sub/prime defaults
         if "gateway_model" in data_copy and "gateway_sub_model" not in data_copy:
             old_model = data_copy.get("gateway_model")

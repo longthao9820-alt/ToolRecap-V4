@@ -21,12 +21,14 @@ from .finalizer import (
     PlannerConfig,
     PlannerDraft,
     PlannerService,
+    SeasonPlanService,
     SeasonEvidenceCatalog,
     pack_catalog,
     unpack_catalog,
 )
 from .models import AudioSelection, DialogueReference, Evidence, PreparedEpisode, Transcript, TranscriptCue
 from .scanner import ScannerChunkPolicy, ScannerConfig, ScannerProjectResult, ScannerService, compute_evidence_revision
+from .vision import FrameExtractionPolicy, FrameExtractor, VisionConfig, VisualEvidenceService
 
 __all__ = [
     "AnalysisCacheManager",
@@ -44,6 +46,7 @@ __all__ = [
     "PlannerConfig",
     "PlannerDraft",
     "PlannerService",
+    "SeasonPlanService",
     "SeasonEvidenceCatalog",
     "PreparedEpisode",
     "Transcript",
@@ -55,6 +58,10 @@ __all__ = [
     "compute_evidence_revision",
     "pack_catalog",
     "unpack_catalog",
+    "FrameExtractionPolicy",
+    "FrameExtractor",
+    "VisionConfig",
+    "VisualEvidenceService",
     "compute_embedded_track_signature",
     "compute_sidecar_signature",
     "compute_source_signature",

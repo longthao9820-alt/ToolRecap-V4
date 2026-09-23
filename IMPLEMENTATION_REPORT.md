@@ -1,12 +1,12 @@
-# ToolRecap V4 — Implementation & Verification Report (Phase 6 Season Planner Draft)
+# ToolRecap V4 — Implementation & Verification Report (Phase 7 Selective Visual Evidence & Season Plan)
 
 **Date**: 2026-09-22  
-**Contract**: Phase 6 — Season Planner + AI-Requested Exact Evidence Fetch
+**Contract**: Phase 7 — Selective Visual Evidence + Final Season Plan Lock
 **Project**: ToolRecap V4  
 **Target Platform**: Windows 10/11 x64 Portable  
 **Version**: v4.0.0  
-**Phase**: Phase 6 — Editorial Planner, Exact Evidence Fetch, Bounded Sessions & Draft Checkpoint
-**Status**: Phase 6 IMPLEMENTED; deterministic Planner tests and prior-phase regressions verified. Phase 7 has not started.
+**Phase**: Phase 7 — Planner-Requested Vision, Visual Evidence & Locked Season Plan
+**Status**: Phase 7 IMPLEMENTED; deterministic visual/plan tests and prior-phase regressions verified. Phase 8 has not started.
 
 ---
 
@@ -21,6 +21,7 @@ This report documents the implementation and verification of **Phase 6** of the 
 - **Phase 4 (Factual Scanner & Evidence Store)**: Added deterministic cue-aware chunking, lossless long-cue parts, text-only Gateway scanning, strict response validation, bounded per-chunk repair, raw-response recovery, stable application-owned Evidence IDs, dependency-aware evidence revisions, bounded Scanner parallelism, and a hash-verified immutable Full Episode Evidence Store.
 - **Phase 5 (Complete Season Evidence Catalog)**: Added one-to-one full-evidence projection, technical completeness ledger, deterministic IDs digest and Catalog hash, exact structural pack/unpack, capacity metrics, atomic persistence/cache, corruption recovery, and `CATALOG_READY` workflow integration with zero AI calls.
 - **Phase 6 (Season Planner Draft)**: Added verbatim raw-prompt delivery, complete Catalog transport, provider-neutral Planner configuration, exact ID/range Evidence fetch, strict two-action protocol, bounded repair/rounds, raw-response recovery, atomic session reuse, technically validated draft outputs/visual requests and `PLANNER_DRAFT_READY` workflow integration.
+- **Phase 7 (Selective Visual Evidence & Season Plan)**: Added deterministic Planner-requested range IDs, local bounded frame extraction, safe still-image Vision, factual Visual Evidence, empty-visual completion, final Planner refinement, deterministic application-owned output IDs, immutable locked `season_plan.json`, cache reuse and `SEASON_PLAN_READY` workflow integration.
 
 ### Exact Scope Executed in Phase 6
 
@@ -128,7 +129,7 @@ All validation suites executed and passed cleanly:
   - Result: 100% clean compilation across all modules and tests, 0 syntax or compilation errors.
 - **Module Import Verification**:
   - Command: `pkgutil.walk_packages` across `toolrecap_v4`
-  - Result: All 63 current submodules cleanly imported without error after Phase 6.
+  - Result: All 68 current submodules cleanly imported without error after Phase 7.
 - **Full Pytest Suite**:
   - Command: `pytest --basetemp="C:\Users\Long\AppData\Local\Temp\kilo\pytest_v4_phase3_run"`
    - Phase 2 baseline: **237 passed**.
@@ -140,6 +141,8 @@ All validation suites executed and passed cleanly:
 - Phase 5 focused coverage: **33 Catalog/packing/store tests** plus updated workflow bypass and `CATALOG_READY` integration assertions.
 - Phase 6 final full suite: **453 passed in 51.05s**, 0 failures, 0 errors, 0 skipped.
 - Phase 6 focused coverage: **35 Planner protocol/fetch/service tests**, two Planner settings tests, and updated workflow boundary/bypass assertions.
+- Phase 7 final full suite: **457 passed in 52.03s**, 0 failures, 0 errors, 0 skipped.
+- Phase 7 focused coverage: **4 selective visual/frame/plan-lock integration tests** plus updated workflow assertions.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
   - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
@@ -191,10 +194,10 @@ All validation suites executed and passed cleanly:
 
 ---
 
-## 4. Explicit Limitations & Boundaries (Phase 7+ Scope)
+## 4. Explicit Limitations & Boundaries (Phase 8+ Scope)
 
 - **General scene Vision**: NOT implemented. Phase 4 is transcript/factual-text only; Phase 3 bitmap subtitle Vision OCR remains crop-restricted.
-- **Selective general Vision and final plan lock**: NOT implemented. Workflow stops at `ProjectStatus.PLANNER_DRAFT_READY` before Phase 7; no `season_plan.json` or canonical `out_###` IDs exist.
+- **Output Writers and Final JSON**: NOT implemented. Workflow stops at `ProjectStatus.SEASON_PLAN_READY` before Phase 8; no narration, Writer output, schema 3.0 Final JSON, voice or render is produced from the plan.
 - **Output Writers & Output Directory Resolver**: NOT implemented. Final JSON generation currently only accepts imported/pre-existing schemas.
 - **Executable Packaging**: Portable binary packaging via `build_portable.py` / PyInstaller was not run; no `dist/ToolRecapV4.exe` exists in this phase.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.
