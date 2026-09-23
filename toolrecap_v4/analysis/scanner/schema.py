@@ -58,6 +58,18 @@ class ScannerObservation:
 
 
 def parse_scanner_json(raw_response: str, *, episode_id: str, chunk_id: str) -> dict[str, Any]:
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ScannerValidationError(
+                    f"Scanner response contains duplicate JSON key: {key}",
+                    issue_codes=("duplicate_json_key",), episode_id=episode_id,
+                    chunk_id=chunk_id, request_phase="validation",
+                )
+            value[key] = item
+        return value
+
     text = raw_response.strip()
     if text.startswith("```"):
         lines = text.splitlines()
@@ -66,7 +78,9 @@ def parse_scanner_json(raw_response: str, *, episode_id: str, chunk_id: str) -> 
             if text.lstrip().lower().startswith("json"):
                 text = text.lstrip()[4:].lstrip()
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(text, object_pairs_hook=reject_duplicate_keys)
+    except ScannerValidationError:
+        raise
     except (json.JSONDecodeError, TypeError) as exc:
         raise ScannerResponseError(
             f"Scanner returned malformed JSON for {chunk_id}: {exc}",
@@ -74,6 +88,17 @@ def parse_scanner_json(raw_response: str, *, episode_id: str, chunk_id: str) -> 
             chunk_id=chunk_id,
             request_phase="validation",
         ) from exc
+    if isinstance(parsed, dict) and set(parsed) == {"choices"}:
+        choices = parsed.get("choices")
+        if (not isinstance(choices, list) or len(choices) != 1 or
+            not isinstance(choices[0], dict) or
+            not isinstance(choices[0].get("message"), dict) or
+            not isinstance(choices[0]["message"].get("content"), str)):
+            raise ScannerValidationError(
+                "Scanner provider wrapper is malformed.", issue_codes=("provider_wrapper",),
+                episode_id=episode_id, chunk_id=chunk_id, request_phase="validation",
+            )
+        return parse_scanner_json(choices[0]["message"]["content"], episode_id=episode_id, chunk_id=chunk_id)
     if not isinstance(parsed, dict):
         raise ScannerValidationError(
             "Scanner response root must be an object.",
