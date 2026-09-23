@@ -33,8 +33,9 @@ def test_remote_voice_cache_does_not_require_or_depend_on_local_endpoint(tmp_pat
     result=cache.prepare_output(output_def=output(),final_json_hash="hash",settings=b,voice_adapter=voice)
     assert result.reused_count==1 and len(voice.calls)==1
 
-def test_invalid_voice_audio_never_becomes_cache_hit(tmp_path):
-    cache=DownstreamVoiceCache(tmp_path,"project-1");voice=Voice(b"not wav")
+@pytest.mark.parametrize("payload",[b"",b"not wav",b"RIFF\x00\x00\x00\x00WAVE"])
+def test_invalid_voice_audio_never_becomes_cache_hit(tmp_path,payload):
+    cache=DownstreamVoiceCache(tmp_path,"project-1");voice=Voice(payload)
     with pytest.raises(InvalidAudioError):cache.prepare_output(output_def=output(),final_json_hash="hash",settings=AppSettings(),voice_adapter=voice)
     assert not list((tmp_path/"projects"/"project-1"/"downstream"/"voice").rglob("manifest.json"))
 

@@ -144,14 +144,20 @@ def test_workflow_reaches_catalog_ready_and_stops_before_phase6(tmp_path, monkey
             assert persistence.has_final_json("project-1")
             self.calls+=1;return wav_bytes()
     voice=Voice();workflow.voice_adapter=voice
+    render_calls={"count":0}
     def fake_render(**kwargs):
+        render_calls["count"]+=1
+        if render_calls["count"]==1:
+            raise RuntimeError("simulated downstream render failure")
         out=tmp_path/"out"/"Generated_Output.mp4";out.parent.mkdir(parents=True,exist_ok=True);out.write_bytes(b"rendered")
         return SimpleNamespace(output_path=out,narration_srt_path=tmp_path/"out"/"Generated_Output.narration.srt",original_srt_path=tmp_path/"out"/"Generated_Output.original.srt",duration=2.0,video_codec="h264",audio_codec="aac",width=640,height=480,fps=25.0)
     monkeypatch.setattr("toolrecap_v4.workflow.render_output",fake_render)
-    final_state=workflow.resume_project("project-1")
-    assert final_state["status"]==ProjectStatus.COMPLETED.value
-    assert final_state["writer_drafts"]["expected_output_count"]==1
-    assert voice.calls==1
     gateway_calls=len(gateway.calls)
+    with pytest.raises(RuntimeError,match="simulated downstream render failure"):
+        workflow.resume_project("project-1")
+    failed=persistence.load_project("project-1")
+    assert failed["status"]==ProjectStatus.FAILED.value and persistence.has_final_json("project-1") and voice.calls==1
     retried=workflow.retry_project("project-1")
     assert retried["status"]==ProjectStatus.COMPLETED.value and voice.calls==1 and len(gateway.calls)==gateway_calls
+    skipped=workflow.retry_project("project-1")
+    assert skipped["status"]==ProjectStatus.COMPLETED.value and render_calls["count"]==2 and voice.calls==1

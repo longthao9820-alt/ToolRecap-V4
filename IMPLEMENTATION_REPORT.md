@@ -12,7 +12,7 @@
 
 ## 1. Executive Summary & Scope
 
-This report documents the implementation and closure verification of **Phase 10** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`), exposing the completed AI architecture through provider-neutral secure settings.
+This report documents the implementation and closure verification of **Phase 11** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`), connecting canonical Final JSON to the preserved VoiceStudio, Audio Mix, and renderer stack.
 
 ### Cumulative Progression:
 - **Phase 1 (Baseline Validated)**: Established independent V4 workspace with 215/215 tests passing, schema 3.0 immutable, Windows DPAPI secret persistence preserved.
@@ -60,7 +60,7 @@ This report documents the implementation and closure verification of **Phase 10*
 6. Local deterministic mapper converts ordered valid outputs to immutable schema 3.0 without AI merge or editorial rewrite.
 7. Canonical validator runs before atomic COMPLETE Final JSON publication; corrupt/mismatched artifacts are not cache hits.
 8. Zero-output plans stop truthfully without fabricated content; one-shot routing foundation is capacity-explicit and seasons remain staged.
-9. Workflow reaches `FINAL_JSON_READY`; no VoiceStudio, Audio Mix, rendering, publishing, UI redesign, or Output Directory Resolver is added.
+9. At the Phase 9 boundary workflow reached `FINAL_JSON_READY`; Phase 11 now connects that checkpoint to the preserved VoiceStudio/Audio Mix/render stack. UI redesign and Output Directory Resolver remain separate phases.
 
 ### Exact Scope Executed in Phase 8
 
@@ -210,8 +210,8 @@ All validation suites executed and passed cleanly:
 - Phase 9 focused coverage: **25 validation/repair/mapping/revision/zero-output tests** plus updated workflow/bypass assertions.
 - Phase 10 closure full suite: **550 passed in 93.75s**, 0 failures, 0 errors, 0 skipped (short Windows-safe isolated basetemp).
 - Phase 10 settings/UI focused suite: **48 passed**, including secure migration, transactional rollback, diagnostics, dependency boundaries and real-Tk interaction tests.
-- Phase 11 final full suite: **558 passed in 57.19s**, 0 failures, 0 errors, 0 skipped.
-- Phase 11 downstream-focused suite: **84 passed**, including 8 new narration-cache/integration tests plus VoiceStudio, renderer, media and workflow regressions.
+- Phase 11 closure full suite: **560 passed in 59.23s**, 0 failures, 0 errors, 0 skipped.
+- Phase 11 downstream-focused suite: **86 passed**, including 10 narration-cache/integration tests plus VoiceStudio, renderer, media and workflow regressions.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
   - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
@@ -279,4 +279,4 @@ All validation suites executed and passed cleanly:
 - **Output Writers**: IMPLEMENTED in Phase 8 as independent response-capture jobs.
 - **Executable Packaging**: Portable binary packaging via `build_portable.py` / PyInstaller was not run; no `dist/ToolRecapV4.exe` exists in this phase.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.
-- **Git state**: Phase 1–9 history is preserved. Phase 10 implementation is `cbe26e8d803c09b9d871196b733969a9f875e704` (`feat: add ai gateway settings ui`) and closure is `664b7a0d865c2d659e786d47f3ec731185bf288b` (`fix: close Phase 10 settings gaps`). No remote or push is configured.
+- **Git state**: Phase 1–10 history is preserved. Phase 11 implementation is `b429cabc7560415ace2593686bd79092b0b5350b` (`feat: connect final json to voice and render`); closure corrections are committed separately. No remote or push is configured.
