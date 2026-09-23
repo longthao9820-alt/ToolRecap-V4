@@ -1,18 +1,18 @@
-# ToolRecap V4 — Implementation & Verification Report (Phase 12 Publication Output Resolver)
+# ToolRecap V4 — Implementation & Verification Report (Phase 13 Portable Packaging)
 
 **Date**: 2026-09-23
-**Contract**: Phase 12 — Central Output Directory Resolver + Publication Boundary
+**Contract**: Phase 13 — Portable Packaging + Self-Check + Safe Updater Acceptance
 **Project**: ToolRecap V4  
 **Target Platform**: Windows 10/11 x64 Portable  
 **Version**: v4.0.0  
-**Phase**: Phase 12 — Publication Destination Resolution and Isolation
-**Status**: Phase 12 IMPLEMENTED with deterministic synthetic verification; packaging and real episode/season acceptance remain later.
+**Phase**: Phase 13 — Portable Packaging, Runtime Resources, Self-Check and Updater
+**Status**: Phase 13 IMPLEMENTED with a real Windows one-folder build, relocated packaged smoke checks, and synthetic updater acceptance. Real episode/season E2E remains later scope.
 
 ---
 
 ## 1. Executive Summary & Scope
 
-This report documents the implementation and closure verification of **Phase 12 — Central Output Directory Resolver + Publication Boundary** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`). The current workflow runs analysis → canonical Final JSON → downstream VoiceStudio/Audio Mix/render → publication through the authoritative Phase 12 resolver. `FINAL_JSON_READY` remains the zero-AI downstream boundary.
+This report documents implementation and closure verification through **Phase 13 — Portable Packaging + Self-Check + Safe Updater Acceptance** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`). The workflow runs analysis → canonical Final JSON → downstream VoiceStudio/Audio Mix/render → publication through the Phase 12 resolver. `FINAL_JSON_READY` remains the zero-AI downstream boundary.
 
 ### Cumulative Progression:
 - **Phase 1 (Baseline Validated)**: Established independent V4 workspace with 215/215 tests passing, schema 3.0 immutable, Windows DPAPI secret persistence preserved.
@@ -27,6 +27,18 @@ This report documents the implementation and closure verification of **Phase 12 
 - **Phase 10 (Gateway Settings)**: Added provider-neutral Scanner/Vision/Finalizer controls, secure transactional API-key save, legacy stage-preserving migration, unified explicit Finalizer mapping, unsaved-value background diagnostics and settings dependency wiring.
 - **Phase 11 (Downstream Integration)**: Connected generated Final JSON to the same imported-JSON VoiceStudio/Audio Mix/render path, added validated narration WAV caching, and verified zero-AI downstream retry/reuse boundaries.
 - **Phase 12 (Publication Resolver)**: Added one authoritative manual/automatic publication-root resolver, automatic sibling `Outputs_<working-folder-name>`, delayed root creation, internal-artifact isolation, destination-aware checkpoints and unowned-target collision protection.
+- **Phase 13 (Portable Packaging & Updater)**: Added centralized relocation-safe resource lookup, one-folder PyInstaller packaging with actual FFmpeg/OCR/STT runtime collection, structured zero-AI self-check, package content validation, safe updater staging/checksum/traversal/active-workflow guards, rollback validation, and real Windows portable smoke acceptance.
+
+### Exact Scope Executed in Phase 13
+
+1. One-folder `ToolRecapV4.exe` packaging keeps Python/source checkout out of the target runtime and bundles the schema, FFmpeg/FFprobe and required OCR/STT runtime modules without user models.
+2. Runtime resource and media lookup use application/package roots rather than the process current working directory; schema 3.0 loads after relocation.
+3. `--selfcheck` is callable from source and frozen runtime, emits structured PASS/WARN/FAIL checks, returns nonzero only for fatal required-runtime failures, performs zero AI/project/render/update work, and redacts credentials.
+4. Self-check covers application state, schema, FFmpeg/FFprobe, encoder fallback, OCR/STT imports and optional model availability, settings, Gateway configuration state, VoiceStudio configuration, Phase 12 resolver, and updater runtime.
+5. Package validation rejects missing runtime layout, schema/resource mismatches, invalid versions, user state, tests and Git metadata.
+6. Updater staging validates semantic version, checksum, archive name, safe extraction and package resources before apply; active workflow state blocks staging/apply.
+7. Update helper validates staged content, separates install/state/publication roots, preserves unknown/user files, rolls back failed handshakes, and cleans staged/backup artifacts.
+8. Real acceptance built `dist/ToolRecapV4`, ran clean-PATH self-check from the build path, relocated it under spaces/Unicode, ran from a different CWD, and validated the release ZIP.
 
 ### Exact Scope Executed in Phase 12
 
@@ -38,7 +50,7 @@ This report documents the implementation and closure verification of **Phase 12 
 6. Managed Final JSON, narration cache and all analysis artifacts remain outside publication root; renderer temp work remains under managed render-work, and neighbor publication staging files are removed on success, cancellation, or failure.
 7. Existing title naming, filename validation, source collision, fingerprint and output SHA checks remain. Unowned existing publication files are rejected rather than overwritten.
 8. Output-directory changes keep Final JSON/AI/narration valid; the current renderer rerenders at the new destination using cached narration.
-9. No packaging/updater acceptance or real production E2E work is included.
+9. No real production episode or season E2E work is included.
 
 ### Exact Scope Executed in Phase 11
 
@@ -203,7 +215,7 @@ All validation suites executed and passed cleanly:
   - Result: 100% clean compilation across all modules and tests, 0 syntax or compilation errors.
 - **Module Import Verification**:
   - Command: `pkgutil.walk_packages` across `toolrecap_v4`
-  - Result: All 75 current submodules cleanly imported without error after Phase 12.
+  - Result: All 76 current submodules cleanly imported without error after Phase 13.
 - **Full Pytest Suite**:
   - Command: `pytest --basetemp="C:\Users\Long\AppData\Local\Temp\kilo\pytest_v4_phase3_run"`
    - Phase 2 baseline: **237 passed**.
@@ -229,6 +241,13 @@ All validation suites executed and passed cleanly:
 - Phase 12 resolver-focused suite: **10 passed in 1.08s**, plus generated/imported workflow and Phase 11 downstream regression coverage.
 - Phase 12 closure regressions: Phase 11 downstream **32 passed**; VoiceStudio **9 passed**; renderer **18 passed**; media **25 passed**; Phase 10 settings **46 passed**; Phase 9 **25 passed**; Phase 8 **20 passed**; Phase 7 **28 passed**; Phase 6 **35 passed**; Phase 5 **33 passed**; Phase 4 Scanner/Evidence **44 passed**; Phase 3 source preparation **106 passed**; Phase 2 Gateway **33 passed**.
 - A first Phase 9 subset invocation used pytest's deeply nested default Windows temp path and hit path-length `ENOENT` errors. The required short Windows-safe `--basetemp` rerun passed all **25** tests; no product code was changed for that environment-only result.
+- Phase 13 focused packaging/self-check tests: **22 passed**; updater tests: **15 passed**. Closure coverage includes the wired UI activity guard, Windows archive traversal variants, interrupted download cleanup, semantic version outcomes, unchanged project artifacts during self-check, and rejection of missing Python runtime files.
+- Phase 13 final full suite: **594 passed in 57.49s**, 0 failures, 0 errors, 0 skipped. The increase from the Phase 13 implementation's 582 is 12 targeted closure tests.
+- Phase 13 regression matrix: Phase 12 **10 passed**; Phase 11 downstream **32 passed**; Phase 10 settings **49 passed**; Phase 9 **25 passed**; Phase 8 **20 passed**; Phase 7 **28 passed**; Phase 6 **35 passed**; Phase 5 **33 passed**; Phase 4 Scanner/Evidence **44 passed**; Phase 3 source preparation **106 passed**; Phase 2 Gateway **33 passed**; VoiceStudio **9 passed**; renderer **18 passed**; media **25 passed**.
+- Phase 13 compilation passed and module import verification passed for **76** submodules; `git diff --check` passed.
+- Real Windows packaging acceptance passed after the closure fix: one-folder build at `dist/ToolRecapV4`, frozen self-check from the build folder, Unicode/space relocation, different-CWD execution, ZIP extraction validation, and package content audit. Frozen self-check returned **0 / WARN** in all three launch contexts; required schema, FFmpeg, FFprobe, OCR, STT, settings, output resolver, and updater checks were **PASS**. Warnings identified optional OCR/STT model absence and incomplete Gateway configuration. Distribution size: **644,958,617 bytes (615.08 MiB)** across 1,973 files; compressed ZIP: **255,557,490 bytes**. Release SHA-256: `fd765da8c1a72bde8d794c38ae6095990f44cdad2228e492840e50b8fb356d32`.
+- Package runtime includes Python 3.12, schema 3.0, FFmpeg/FFprobe, Pillow, ONNX Runtime/RapidOCR, faster-whisper/CTranslate2, tkinter, and updater code. User settings, DPAPI secrets, projects, models, output media, tests, pytest and Git metadata are absent. Managed state remains `%LOCALAPPDATA%\ToolRecapV4\`; the install directory is read-only runtime content for normal operation.
+- Updater acceptance uses semantic versions, published archive SHA-256, bounded safe extraction and package resource validation; it is checksum-based, without a release-signature claim. The Settings dialog now passes workflow activity to staging/apply guards. A separate helper waits for process exit, copies the frozen runtime outside the install directory, applies validated files, runs a startup handshake, and restores backed-up install files on failure. Synthetic valid/invalid cases and preservation of settings, DPAPI placeholder, project, Final JSON, narration, and publication markers passed.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
   - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
@@ -286,17 +305,19 @@ All validation suites executed and passed cleanly:
 
 ---
 
-## 4. Explicit Limitations & Boundaries (Phase 13+ Scope)
+## 4. Explicit Limitations & Boundaries (Phase 14+ Scope)
 
 - **General scene Vision boundary**: Selective Planner-requested still-image Vision is implemented in Phase 7. Full-episode/season scans, video upload and arbitrary sampling remain prohibited.
 - **Writer validation/repair and Final JSON**: IMPLEMENTED in Phase 9.
 - **AI Gateway settings UI and secure migration**: IMPLEMENTED in Phase 10.
 - **Voice/Audio Mix/render verification**: IMPLEMENTED in Phase 11 using deterministic mocks/synthetic media; no real production episode/season acceptance is claimed.
 - **Output Directory Resolver**: IMPLEMENTED in Phase 12.
-- **Phase 13 packaging/selfcheck/updater acceptance**: NOT started.
+- **Portable packaging/self-check/updater acceptance**: IMPLEMENTED and verified in Phase 13.
 - **Real episode E2E**: NOT started; no real production episode acceptance is claimed.
 - **Real season E2E**: NOT started; no real production season acceptance is claimed.
 - **Output Writers**: IMPLEMENTED in Phase 8 as independent response-capture jobs.
-- **Executable Packaging**: Portable binary packaging via `build_portable.py` / PyInstaller was not run; no `dist/ToolRecapV4.exe` exists in this phase.
+- **Executable Packaging**: One-folder `dist/ToolRecapV4/ToolRecapV4.exe` and `release/ToolRecapV4-v4.0.0-windows-portable.zip` were built and verified. Generated artifacts remain ignored by Git.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.
-- **Git state**: Phase 1–11 history is preserved. Phase 12 implementation is `1cce2e54fdab266c07d0322f423ecf1ecd329161` (`feat: add publication output resolver`) and its separate closure correction is `c73afdfc1a3689b23d7225bb9c02bc52ca779ee3` (`fix: close Phase 12 publication gaps`). No remote or push is configured.
+- **External services and hardware**: 9Router and VoiceStudio remain external and were not called by self-check. OCR/STT models remain managed downloads. NVIDIA hardware/driver is not bundled; CPU libx264 fallback was verified. Live release-server update, fresh target-machine/VM acceptance, real single-episode E2E, and real season E2E remain unverified.
+- **Git state**: Phase 1–12 history is preserved. Phase 13 implementation is `fdba22b36c75d7fd842c49aa341e119c2e4f1a5d` (`feat: harden portable packaging and updater`); closure fixes are `bdf8f09e2a08b3eb8ac3235601233f568a2617db` (`fix: close Phase 13 packaging gaps`) and `27a3f1221559007ad7e86e0b7e6657b899f382f1` (`fix: validate Python runtime in portable updates`). No remote or push is configured.
+- **Phase 14**: NOT started. No real episode E2E or real season E2E acceptance is claimed.

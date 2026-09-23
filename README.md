@@ -1,13 +1,13 @@
-# Hướng dẫn sử dụng ToolRecap V4 (Phase 12 Publication Output Resolver)
+# Hướng dẫn sử dụng ToolRecap V4 (Phase 13 Portable Packaging)
 
 ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tóm tắt và dựng video recap từ video nguồn.
 
 ---
 
-## 1. Trạng thái hiện tại: Phase 12 Publication Output Resolver
+## 1. Trạng thái hiện tại: Phase 13 Portable Packaging
 
 > **LƯU Ý TRUNG THỰC VỀ TIẾN ĐỘ & BẢN DỰNG:**
-> Hiện tại dự án đã hoàn thành **Phase 12 (Central Publication Output Resolver)**:
+> Hiện tại dự án đã hoàn thành **Phase 13 (Portable Packaging + Self-Check + Safe Updater Acceptance)**. Phase 12 Publication Resolver remains part of the runtime:
 > - **Hệ thống chuẩn bị nguồn cục bộ hoàn chỉnh**: Mô-đun `toolrecap_v4.analysis` xử lý trích xuất phụ đề, bóc tách âm thanh, nhận diện tiếng nói và lưu trữ tạo tác chuẩn bị có kiểm soát chất lượng.
 > - **Thứ tự ưu tiên trích xuất hội thoại nghiêm ngặt**:
 >   1. Phụ đề rời tiếng Anh (Sidecar text: SRT, VTT, ASS) với khả năng làm sạch thẻ định dạng.
@@ -94,15 +94,15 @@ ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tó
 >   - Khi dự án đã có Final JSON hợp lệ hoặc được import từ trước: chạy thẳng vào luồng dựng (render), thực hiện chính xác 0 lượt gọi Gateway và 0 lượt chạy chuẩn bị nguồn.
 >   - Khi các model cần thiết đã cấu hình: ... → independent Writers → targeted validation/repair → schema 3.0 Final JSON → `FINAL_JSON_READY` (ranh giới downstream zero-AI) → VoiceStudio/Audio Mix/render → publication qua Phase 12 Output Directory Resolver.
 >   - Fresh install chưa cấu hình Scanner model dừng rõ ràng ở `PREPARED`; ID model là free text, provider-neutral. Settings cũ được migrate nguyên literal từ `gateway_sub_model`.
-> - **CHƯA CÓ CÁC TÍNH NĂNG PHASE 13+**: portable packaging/updater acceptance và real episode/season E2E CHƯA được triển khai.
-> - **CHƯA CÓ BẢN DỰNG EXE**: Chưa chạy đóng gói `build_portable.py` / PyInstaller; chưa có tệp `ToolRecapV4.exe` trong `dist/` hoặc bản nén trong `release/`.
+> - **Portable package đã được build và kiểm tra thực tế**: one-folder `dist/ToolRecapV4/ToolRecapV4.exe`, portable ZIP trong `release/`, self-check chạy với Python/source path bị loại khỏi PATH, sau relocation Unicode/space và từ CWD khác.
+> - **Phase 14+ chưa bắt đầu**: real single-episode/season E2E chưa được chấp nhận; Phase 14 full acceptance campaign chưa bắt đầu.
 > - **MỤC TIÊU CẬP NHẬT CHƯA XÁC MINH PHÁT HÀNH**: Cấu hình kho cập nhật đích `longthao9820-alt/ToolRecap-V4` là định danh cấu hình, chưa có bản release thực tế trên remote.
 
 ---
 
-## 2. Cách mở ứng dụng (Khi có bản dựng)
+## 2. Cách mở ứng dụng portable
 
-> **CẢNH BÁO:** Hiện tại chưa có tệp EXE trong thư mục dự án. Các bước dưới đây sẽ áp dụng sau khi chạy quy trình đóng gói ở các giai đoạn tiếp theo:
+> **GHI CHÚ:** Bản portable one-folder hiện có trong `dist/ToolRecapV4/`; bản ZIP phát hành nằm trong `release/`. Trạng thái người dùng vẫn ở `%LOCALAPPDATA%\ToolRecapV4\`, không nằm cạnh EXE.
 
 - **Cách 1 (Thư mục chạy ngay sau khi build):**
   Vào thư mục `dist/ToolRecapV4` và nhấp đúp chuột vào tệp:
@@ -111,7 +111,9 @@ ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tó
 - **Cách 2 (Bản nén phát hành sau khi build):**
   Mở thư mục `release`, giải nén tệp `ToolRecapV4-v4.0.0-windows-portable.zip` ra bất kỳ đâu, rồi nhấp đúp vào `ToolRecapV4.exe` bên trong.
 
-> **Ghi chú:** Ứng dụng tích hợp sẵn FFmpeg, FFprobe và bộ kiểm tra hợp lệ (`--selfcheck`), không cần cài đặt thêm Python hay phần mềm phụ trợ bên ngoài.
+> **Ghi chú:** Package chứa Python runtime, FFmpeg, FFprobe, OCR/STT runtime và `--selfcheck`. Các mô hình OCR/STT được tải/quản lý riêng trong LocalAppData. AI Gateway/9Router và VoiceStudio là dịch vụ ngoài, cần cấu hình cho các tính năng tương ứng; GPU/NVIDIA driver tùy phần cứng, có CPU fallback.
+
+Chạy kiểm tra hệ thống mà không mở project: `ToolRecapV4.exe --selfcheck --selfcheck-json <đường-dẫn-report.json>`. Exit code `0` nghĩa là các yêu cầu runtime bắt buộc đã đạt; `WARN` cho model/credential/hardware tùy chọn không làm self-check thất bại. Bản portable có thể chuyển thư mục; settings, projects và DPAPI secrets tiếp tục nằm dưới `%LOCALAPPDATA%\ToolRecapV4\`. Chép riêng thư mục ứng dụng sang máy mới không chuyển dữ liệu người dùng hoặc khóa API đã mã hóa bằng DPAPI; có thể cần nhập lại credentials trong Settings.
 
 ---
 
