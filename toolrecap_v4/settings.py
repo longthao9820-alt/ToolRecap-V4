@@ -90,6 +90,7 @@ class AppSettings:
     writer_parallelism: int = 3
     writer_max_request_bytes: int | None = None
     writer_max_response_bytes: int = 10 * 1024 * 1024
+    writer_repair_attempts: int = 2
 
     # Notifications (all defaults ON)
     notify_complete: bool = True
@@ -141,6 +142,8 @@ class AppSettings:
             raise ValueError("writer_max_request_bytes must be null or at least 1024")
         if self.writer_max_response_bytes < 1024:
             raise ValueError("writer_max_response_bytes must be at least 1024")
+        if self.writer_repair_attempts < 0:
+            raise ValueError("writer_repair_attempts must be non-negative")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert settings to dictionary."""

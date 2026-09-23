@@ -249,6 +249,19 @@ class WriterPersistenceError(WriterError): pass
 class WriterRevisionError(WriterError): pass
 
 
+class WriterValidationError(ToolRecapError):
+    def __init__(self,message:str,*,output_id:str|None=None,issue_codes:tuple[str,...]=()):super().__init__(message);self.output_id=output_id;self.issue_codes=issue_codes
+class WriterReferenceError(WriterValidationError): pass
+class WriterRepairError(ToolRecapError): pass
+class WriterRepairExhaustedError(WriterRepairError): pass
+class FinalJsonMappingError(ToolRecapError): pass
+class FinalJsonValidationError(ToolRecapError): pass
+class FinalJsonPersistenceError(ToolRecapError): pass
+class FinalJsonRevisionError(ToolRecapError): pass
+class ZeroOutputError(ToolRecapError): pass
+class OneShotRoutingError(ToolRecapError): pass
+
+
 class CancelledError(ToolRecapError):
     """Raised when an operation is cancelled."""
 

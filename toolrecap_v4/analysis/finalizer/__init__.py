@@ -34,6 +34,8 @@ from .planner_service import PlannerConfig, PlannerRunResult, PlannerService
 from .season_plan import SeasonPlan, SeasonPlanResult, SeasonPlanService
 from .writer import WriterArtifact, WriterJob, WriterRunResult, assemble_writer_jobs, build_writer_prompt
 from .writer_service import WriterConfig, WriterService
+from .finalization import FinalizationResult, OutputValidator, ValidationResult, map_final_json, route_one_shot
+from .finalization_service import FinalizationConfig, FinalizationService
 
 __all__ = [
     "CATALOG_PROJECTION_VERSION",
@@ -67,6 +69,13 @@ __all__ = [
     "WriterJob",
     "WriterRunResult",
     "WriterService",
+    "FinalizationConfig",
+    "FinalizationResult",
+    "FinalizationService",
+    "OutputValidator",
+    "ValidationResult",
+    "map_final_json",
+    "route_one_shot",
     "assemble_writer_jobs",
     "build_writer_prompt",
     "SeasonEvidenceCatalog",

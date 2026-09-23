@@ -1,18 +1,18 @@
-# ToolRecap V4 — Implementation & Verification Report (Phase 8 Independent Per-Output Writers)
+# ToolRecap V4 — Implementation & Verification Report (Phase 9 Validation, Repair & Final JSON)
 
 **Date**: 2026-09-22  
-**Contract**: Phase 8 — Independent Per-Output Writers + Writer Draft Checkpoints
+**Contract**: Phase 9 — Per-Output Validation + Targeted Repair + Deterministic Final JSON
 **Project**: ToolRecap V4  
 **Target Platform**: Windows 10/11 x64 Portable  
 **Version**: v4.0.0  
-**Phase**: Phase 8 — Authoritative Writer Context, Independent Execution & Response Capture
-**Status**: Phase 8 IMPLEMENTED; Writer response artifacts stop before Phase 9 validation/repair/merge.
+**Phase**: Phase 9 — Deterministic Output Validation, Repair and Schema 3.0 Assembly
+**Status**: Phase 9 IMPLEMENTED; canonical Final JSON stops before Phase 10/11 UI and rendering verification.
 
 ---
 
 ## 1. Executive Summary & Scope
 
-This report documents the implementation and closure verification of **Phase 8** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`), adding independent per-output Writers over the immutable locked Season Plan.
+This report documents the implementation and verification of **Phase 9** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`), validating independent Writer responses and producing the canonical schema 3.0 Final JSON.
 
 ### Cumulative Progression:
 - **Phase 1 (Baseline Validated)**: Established independent V4 workspace with 215/215 tests passing, schema 3.0 immutable, Windows DPAPI secret persistence preserved.
@@ -23,6 +23,19 @@ This report documents the implementation and closure verification of **Phase 8**
 - **Phase 6 (Season Planner Draft)**: Added verbatim raw-prompt delivery, complete Catalog transport, provider-neutral Planner configuration, exact ID/range Evidence fetch, strict two-action protocol, bounded repair/rounds, raw-response recovery, atomic session reuse, technically validated draft outputs/visual requests and `PLANNER_DRAFT_READY` workflow integration.
 - **Phase 7 (Selective Visual Evidence & Season Plan)**: Added deterministic Planner-requested range IDs, local bounded frame extraction, safe still-image Vision, factual Visual Evidence, empty-visual completion, final Planner refinement, deterministic application-owned output IDs, immutable locked `season_plan.json`, cache reuse and `SEASON_PLAN_READY` workflow integration.
 - **Phase 8 (Independent Writers)**: Added deterministic Writer jobs from locked `out_###` entries, authoritative Full/Visual Evidence context, verbatim raw prompt, provider-neutral text-only requests, bounded parallelism, per-output raw checkpoints/cache/resume, best-effort structured extraction and `WRITER_DRAFTS_READY` workflow integration.
+- **Phase 9 (Validation/Repair/Merge)**: Added deterministic per-output issue codes, invalid-only bounded repair, repair recovery/provenance, immutable validated outputs, application-owned schema 3.0 mapping, canonical validation, atomic Final JSON checkpoint/reuse and `FINAL_JSON_READY` workflow integration.
+
+### Exact Scope Executed in Phase 9
+
+1. Parses captured Writer JSON and validates identity, narration, segments, authoritative Evidence/Visual references and evidence-grounded source clips independently per output.
+2. Deterministic sorted issue codes distinguish valid and repairable-invalid responses without subjective prose scoring.
+3. Only invalid outputs receive bounded provider-neutral repair; valid siblings remain untouched and original responses are never overwritten.
+4. Repair prompts carry exact issue codes, raw prompt, locked entry and complete output-specific authoritative context; repair cannot replan or alter output identity/order.
+5. Repair raw responses/results/provenance are checkpointed per attempt and recover after crash without repeating paid calls.
+6. Local deterministic mapper converts ordered valid outputs to immutable schema 3.0 without AI merge or editorial rewrite.
+7. Canonical validator runs before atomic COMPLETE Final JSON publication; corrupt/mismatched artifacts are not cache hits.
+8. Zero-output plans stop truthfully without fabricated content; one-shot routing foundation is capacity-explicit and seasons remain staged.
+9. Workflow reaches `FINAL_JSON_READY`; no VoiceStudio, Audio Mix, rendering, publishing, UI redesign, or Output Directory Resolver is added.
 
 ### Exact Scope Executed in Phase 8
 
@@ -126,7 +139,7 @@ This report documents the implementation and closure verification of **Phase 8**
 | **Memory Boundedness** | `ENFORCED` | Audio energy reads 4096-frame chunks; no full WAV in memory. Image OCR operates on bounded subtitle crops, never full video frames. |
 | **Stream Indexing Integrity** | `ENFORCED` | `AudioSelection` maintains separate `global_index` and `audio_ordinal`. Error raised if map spec requested on missing audio. |
 | **Editorial Independence** | `CLEAN` | No editorial policy classes, cue-capping heuristics, or arbitrary time clamping injected into analysis/preparation. |
-| **Controlled Workflow Boundary**| `VERIFIED` | Fully configured analysis reaches `ProjectStatus.WRITER_DRAFTS_READY` and stops before Phase 9; missing Writer configuration stops at `SEASON_PLAN_READY`. |
+| **Controlled Workflow Boundary**| `VERIFIED` | Fully configured nonzero analysis reaches `ProjectStatus.FINAL_JSON_READY` and stops before Phase 10/11; generated Final JSON exists before any downstream voice/render work. |
 | **Scanner Editorial Isolation** | `VERIFIED` | Scanner receives no Recap Prompt, application ranking policy, candidate logic, output quota, video, whole audio, or arbitrary local path. |
 | **Stable Evidence Identity** | `VERIFIED` | IDs are application-owned, deterministic after sorted validated chunk artifacts, and scoped by project + evidence revision. |
 | **Full Evidence Retention** | `VERIFIED` | Range queries return every overlap in deterministic order; no top-K, fuzzy dedupe, story ranking, or character/subplot filtering. |
@@ -152,7 +165,7 @@ All validation suites executed and passed cleanly:
   - Result: 100% clean compilation across all modules and tests, 0 syntax or compilation errors.
 - **Module Import Verification**:
   - Command: `pkgutil.walk_packages` across `toolrecap_v4`
-  - Result: All 71 current submodules cleanly imported without error after Phase 8.
+  - Result: All 73 current submodules cleanly imported without error after Phase 9.
 - **Full Pytest Suite**:
   - Command: `pytest --basetemp="C:\Users\Long\AppData\Local\Temp\kilo\pytest_v4_phase3_run"`
    - Phase 2 baseline: **237 passed**.
@@ -168,6 +181,8 @@ All validation suites executed and passed cleanly:
 - Phase 7 focused coverage: **28 targeted visual request/frame/Vision/cache/plan-lock tests** plus updated workflow assertions.
 - Phase 8 closure full suite: **501 passed in 68.99s**, 0 failures, 0 errors, 0 skipped.
 - Phase 8 closure focused coverage: **20 targeted Writer context/integrity/execution/cache/response-boundary tests** plus updated workflow/bypass assertions.
+- Phase 9 final full suite: **522 passed in 67.03s**, 0 failures, 0 errors, 0 skipped.
+- Phase 9 focused coverage: **21 validation/repair/mapping/reuse tests** plus updated workflow/bypass assertions.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
   - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
@@ -225,13 +240,12 @@ All validation suites executed and passed cleanly:
 
 ---
 
-## 4. Explicit Limitations & Boundaries (Phase 9+ Scope)
+## 4. Explicit Limitations & Boundaries (Phase 10+ Scope)
 
 - **General scene Vision boundary**: Selective Planner-requested still-image Vision is implemented in Phase 7. Full-episode/season scans, video upload and arbitrary sampling remain prohibited.
-- **Writer validation/repair and Final JSON**: NOT implemented. Phase 8 captures Writer responses and draft parse status only; Phase 9 owns semantic validation, AI repair, deterministic merge and production Final JSON.
+- **Writer validation/repair and Final JSON**: IMPLEMENTED in Phase 9.
+- **Gateway settings UI redesign, verified Voice/Audio Mix/render integration and Output Directory Resolver**: NOT implemented; remain later scope.
 - **Output Writers**: IMPLEMENTED in Phase 8 as independent response-capture jobs.
-- **Phase 9 validation/repair/merge and production Final JSON**: NOT implemented.
-- **Output Directory Resolver**: NOT implemented; remains later scope.
 - **Executable Packaging**: Portable binary packaging via `build_portable.py` / PyInstaller was not run; no `dist/ToolRecapV4.exe` exists in this phase.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.
-- **Git state**: Phase 7 implementation commit `b4eb214` is preserved; closure corrections are committed separately. No remote or push is configured.
+- **Git state**: Phase 1–8 history is preserved; Phase 9 is committed separately. No remote or push is configured.

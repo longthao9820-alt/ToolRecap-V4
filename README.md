@@ -1,13 +1,13 @@
-# Hướng dẫn sử dụng ToolRecap V4 (Phase 8 Independent Per-Output Writers)
+# Hướng dẫn sử dụng ToolRecap V4 (Phase 9 Writer Validation & Final JSON)
 
 ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tóm tắt và dựng video recap từ video nguồn.
 
 ---
 
-## 1. Trạng thái hiện tại: Phase 8 Independent Writer Drafts
+## 1. Trạng thái hiện tại: Phase 9 Targeted Repair & Schema 3.0 Final JSON
 
 > **LƯU Ý TRUNG THỰC VỀ TIẾN ĐỘ & BẢN DỰNG:**
-> Hiện tại dự án đã hoàn thành **Phase 8 (Independent Per-Output Writers & Draft Checkpoints)**:
+> Hiện tại dự án đã hoàn thành **Phase 9 (Per-Output Validation, Targeted Repair & Deterministic Final JSON)**:
 > - **Hệ thống chuẩn bị nguồn cục bộ hoàn chỉnh**: Mô-đun `toolrecap_v4.analysis` xử lý trích xuất phụ đề, bóc tách âm thanh, nhận diện tiếng nói và lưu trữ tạo tác chuẩn bị có kiểm soát chất lượng.
 > - **Thứ tự ưu tiên trích xuất hội thoại nghiêm ngặt**:
 >   1. Phụ đề rời tiếng Anh (Sidecar text: SRT, VTT, ASS) với khả năng làm sạch thẻ định dạng.
@@ -63,11 +63,19 @@ ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tó
 >   - Writer requests dùng text/JSON only; không gửi video, audio, frame bytes hoặc Writer output của job khác.
 >   - Bounded parallelism, per-output cache/resume, full raw-response checkpoint/recovery và partial-failure preservation được hỗ trợ.
 >   - Structured extraction chỉ best-effort (`PARSED`, `UNPARSED`, `INVALID_FOR_PHASE9`); Phase 8 không gọi AI repair và không khẳng định semantic validity.
+> - **Per-output strict validation & targeted repair**:
+>   - Mỗi `out_###` được parse/validate độc lập bằng deterministic issue codes; valid sibling không bị gọi repair hoặc thay đổi.
+>   - Chỉ output invalid nhận bounded AI repair với raw prompt, locked brief, exact errors và authoritative Evidence/Visual Evidence.
+>   - Original Writer response, repair attempts, validation results và validated output được giữ riêng, hash/checkpoint để resume.
+> - **Deterministic Final JSON schema 3.0**:
+>   - Application mapping giữ canonical Season Plan order, không AI merge, không rerank/rewrite narration.
+>   - Final artifact được kiểm bằng canonical validator/schema 3.0 rồi ghi atomic và reuse theo semantic revision.
+>   - Locked zero-output plan không bị bịa output; hiện dừng rõ bằng `ZeroOutputError` vì canonical application validator không chấp nhận outputs rỗng.
 > - **Workflow kiểm soát chặt chẽ**:
 >   - Khi dự án đã có Final JSON hợp lệ hoặc được import từ trước: chạy thẳng vào luồng dựng (render), thực hiện chính xác 0 lượt gọi Gateway và 0 lượt chạy chuẩn bị nguồn.
->   - Khi các model cần thiết đã cấu hình: source preparation → Scanner → Catalog → Planner/Vision → locked Season Plan → independent Writers → `WRITER_DRAFTS_READY`, sau đó dừng trước Phase 9.
+>   - Khi các model cần thiết đã cấu hình: ... → independent Writers → targeted validation/repair → schema 3.0 Final JSON → `FINAL_JSON_READY`, sau đó dừng trước Phase 10/11.
 >   - Fresh install chưa cấu hình Scanner model dừng rõ ràng ở `PREPARED`; ID model là free text, provider-neutral. Settings cũ được migrate nguyên literal từ `gateway_sub_model`.
-> - **CHƯA CÓ CÁC TÍNH NĂNG PHASE 9+**: strict Writer semantic validation/AI repair, deterministic merge, production Final JSON, VoiceStudio execution và render/publish CHƯA được triển khai.
+> - **CHƯA CÓ CÁC TÍNH NĂNG PHASE 10+**: Gateway settings UI redesign, verified VoiceStudio/Audio Mix/render integration, Output Directory Resolver, packaging và real production acceptance CHƯA được triển khai.
 > - **CHƯA CÓ BẢN DỰNG EXE**: Chưa chạy đóng gói `build_portable.py` / PyInstaller; chưa có tệp `ToolRecapV4.exe` trong `dist/` hoặc bản nén trong `release/`.
 > - **MỤC TIÊU CẬP NHẬT CHƯA XÁC MINH PHÁT HÀNH**: Cấu hình kho cập nhật đích `longthao9820-alt/ToolRecap-V4` là định danh cấu hình, chưa có bản release thực tế trên remote.
 
@@ -125,6 +133,7 @@ Tất cả dữ liệu làm việc, cấu hình và tệp tạm được lưu ri
 - `projects/<project_id>/visual/<visual-revision>/`: selective Visual Evidence và completeness manifest.
 - `projects/<project_id>/plans/<plan-revision>/season_plan.json`: locked, immutable Season Plan.
 - `projects/<project_id>/writers/<season-plan-hash>/<out_###>/`: per-output context manifest, full raw response, best-effort draft extraction and response-complete manifest.
+- `projects/<project_id>/finalization/<revision>/`: validated outputs, repair provenance, canonical `final.json` and COMPLETE manifest.
 - `cache/analysis/`: Bộ nhớ đệm phân tích và trích xuất phụ đề/âm thanh content-addressable.
 - `sub_analysis/`: Checkpoint phân tích (`sub_analysis/<mã_dự_án>.txt`).
 - `final/`: Kịch bản Final JSON (`final/<mã_dự_án>.json`).

@@ -127,8 +127,9 @@ def test_workflow_reaches_catalog_ready_and_stops_before_phase6(tmp_path):
     assert planner.calls[0]["raw_recap_prompt"] == "THIS CREATIVE PROMPT MUST NEVER ENTER SCANNER"
     assert planner.calls[0]["catalog"].catalog_hash == planned["catalog"]["catalog_hash"]
     workflow.writer_service = SimpleNamespace(run=lambda **kwargs: SimpleNamespace(artifacts=(), reused_count=0, requested_count=0))
-    with pytest.raises(AnalysisPipelineUnavailableError, match="Phase 9"):
+    workflow.finalization_service = SimpleNamespace(run=lambda **kwargs: SimpleNamespace(revision="final-stub",artifact_hash="final-hash",final_json={"schema_version":"3.0","project_id":"project-1","project_name":"Project","sources":[],"outputs":[]},repaired_output_ids=(),reused=False))
+    with pytest.raises(AnalysisPipelineUnavailableError, match="Phase 10"):
         workflow.resume_project("project-1")
-    written = persistence.load_project("project-1")
-    assert written["status"] == ProjectStatus.WRITER_DRAFTS_READY.value
-    assert written["writer_drafts"]["expected_output_count"] == 0
+    final_state=persistence.load_project("project-1")
+    assert final_state["status"]==ProjectStatus.FINAL_JSON_READY.value
+    assert final_state["writer_drafts"]["expected_output_count"]==0

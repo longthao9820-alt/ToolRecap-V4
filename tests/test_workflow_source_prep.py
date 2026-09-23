@@ -435,6 +435,8 @@ def test_imported_final_json_zero_prep_and_zero_gateway(workflow_env: dict[str, 
     mock_planner.run.side_effect = AssertionError("Planner must not run for imported Final JSON")
     mock_writer = MagicMock()
     mock_writer.run.side_effect = AssertionError("Writer must not run for imported Final JSON")
+    mock_finalizer = MagicMock()
+    mock_finalizer.run.side_effect = AssertionError("Phase 9 finalizer must not run for imported Final JSON")
     workflow = ProjectWorkflow(
         persistence=storage,
         gateway_client=mock_gw,
@@ -442,6 +444,7 @@ def test_imported_final_json_zero_prep_and_zero_gateway(workflow_env: dict[str, 
         catalog_service=mock_catalog,
         planner_service=mock_planner,
         writer_service=mock_writer,
+        finalization_service=mock_finalizer,
     )
 
     project_id = "proj-import-zero-prep-01"
@@ -506,6 +509,7 @@ def test_imported_final_json_zero_prep_and_zero_gateway(workflow_env: dict[str, 
     assert mock_catalog.build_or_load.call_count == 0
     assert mock_planner.run.call_count == 0
     assert mock_writer.run.call_count == 0
+    assert mock_finalizer.run.call_count == 0
 
     # Project reached COMPLETED status
     assert res_state["status"] == ProjectStatus.COMPLETED.value

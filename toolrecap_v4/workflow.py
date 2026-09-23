@@ -30,7 +30,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from toolrecap_v4.analysis.cache import AnalysisCacheManager
-from toolrecap_v4.analysis.finalizer import CatalogService, PlannerConfig, PlannerService, SeasonPlanService, WriterConfig, WriterService
+from toolrecap_v4.analysis.finalizer import CatalogService, FinalizationConfig, FinalizationService, PlannerConfig, PlannerService, SeasonPlanService, WriterConfig, WriterService
 from toolrecap_v4.analysis.vision import FrameExtractionPolicy, VisionConfig, VisualEvidenceService
 from toolrecap_v4.analysis.models import PreparedEpisode
 from toolrecap_v4.analysis.scanner import ScannerChunkPolicy, ScannerConfig, ScannerService
@@ -85,6 +85,7 @@ class ProjectStatus(str, enum.Enum):
     PLANNER_DRAFT_READY = "planner_draft_ready"
     SEASON_PLAN_READY = "season_plan_ready"
     WRITER_DRAFTS_READY = "writer_drafts_ready"
+    FINAL_JSON_READY = "final_json_ready"
     RENDERING = "rendering"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -129,6 +130,7 @@ class WorkflowCallbacks:
     on_planner_draft_ready: Optional[Callable[[str, Dict[str, Any]], None]] = None
     on_season_plan_ready: Optional[Callable[[str, Dict[str, Any]], None]] = None
     on_writer_drafts_ready: Optional[Callable[[Dict[str, Any]], None]] = None
+    on_final_json_ready: Optional[Callable[[Dict[str, Any]], None]] = None
 
 
 def resolve_sources(
@@ -380,6 +382,7 @@ class ProjectWorkflow:
         visual_service: Optional[VisualEvidenceService] = None,
         season_plan_service: Optional[SeasonPlanService] = None,
         writer_service: Optional[WriterService] = None,
+        finalization_service: Optional[FinalizationService] = None,
     ) -> None:
         self.persistence = persistence or ProjectPersistence(storage_root=storage_root)
         self.settings_manager = settings_manager or SettingsManager(persistence=self.persistence)
@@ -392,6 +395,7 @@ class ProjectWorkflow:
         self.visual_service = visual_service
         self.season_plan_service = season_plan_service
         self.writer_service = writer_service
+        self.finalization_service = finalization_service
 
     def create_project(
         self,
@@ -1008,9 +1012,16 @@ class ProjectWorkflow:
                 state["status"]=ProjectStatus.WRITER_DRAFTS_READY.value;state["writer_drafts"]=writer_summary;state["error"]=phase9_msg;state.setdefault("timestamps",{})["writer_drafts_ready_at"]=now_w;state["timestamps"]["updated_at"]=now_w;self.persistence.save_project(state)
                 if callbacks and callbacks.on_writer_drafts_ready:callbacks.on_writer_drafts_ready(writer_summary)
                 if callbacks and callbacks.on_status_change:callbacks.on_status_change(ProjectStatus.WRITER_DRAFTS_READY.value)
-                phase9_err=AnalysisPipelineUnavailableError(phase9_msg)
-                if callbacks and callbacks.on_error:callbacks.on_error(phase9_err,None)
-                raise phase9_err
+                finalizer=self.finalization_service or FinalizationService(self.gateway_client,self.persistence.root,FinalizationConfig(cfg.writer_model,cfg.writer_reasoning,cfg.writer_repair_attempts,cfg.writer_max_request_bytes,cfg.writer_max_response_bytes))
+                finalized=finalizer.run(project_id=project_id,project_name=state["project_name"],raw_prompt=state.get("prompt",""),language=cfg.recap_language,plan=plan_result.plan,episodes=prepared_models,visual=visual_result,cancellation_token=cancellation_token)
+                final_summary={"status":"completed","revision":finalized.revision,"artifact_hash":finalized.artifact_hash,"output_count":len(finalized.final_json["outputs"]),"repaired_output_ids":list(finalized.repaired_output_ids),"reused":finalized.reused,"completed_at":datetime.now(timezone.utc).isoformat()}
+                self.persistence.save_checkpoint(project_id,"final_json",final_summary);now_f=datetime.now(timezone.utc).isoformat();phase10_msg="Analysis pipeline stopped: canonical schema 3.0 Final JSON is ready (FINAL_JSON_READY); Phase 10 settings migration is not implemented."
+                state["status"]=ProjectStatus.FINAL_JSON_READY.value;state["final_json"]=finalized.final_json;state["finalization"]=final_summary;state["error"]=phase10_msg;state.setdefault("timestamps",{})["final_json_ready_at"]=now_f;state["timestamps"]["updated_at"]=now_f;self.persistence.save_project(state)
+                if callbacks and callbacks.on_final_json_ready:callbacks.on_final_json_ready(final_summary)
+                if callbacks and callbacks.on_status_change:callbacks.on_status_change(ProjectStatus.FINAL_JSON_READY.value)
+                phase10_err=AnalysisPipelineUnavailableError(phase10_msg)
+                if callbacks and callbacks.on_error:callbacks.on_error(phase10_err,None)
+                raise phase10_err
 
             # Step 2: Source integrity check (source changes fail no substitution)
             verify_source_integrity(state["source_fingerprints"], cancellation_token=cancellation_token)
