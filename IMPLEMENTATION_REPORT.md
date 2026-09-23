@@ -1,6 +1,6 @@
 # ToolRecap V4 — Implementation & Verification Report (Phase 12 Publication Output Resolver)
 
-**Date**: 2026-09-22  
+**Date**: 2026-09-23
 **Contract**: Phase 12 — Central Output Directory Resolver + Publication Boundary
 **Project**: ToolRecap V4  
 **Target Platform**: Windows 10/11 x64 Portable  
@@ -12,7 +12,7 @@
 
 ## 1. Executive Summary & Scope
 
-This report documents the implementation and closure verification of **Phase 11** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`), connecting canonical Final JSON to the preserved VoiceStudio, Audio Mix, and renderer stack.
+This report documents the implementation and closure verification of **Phase 12 — Central Output Directory Resolver + Publication Boundary** of the ToolRecap V4 migration plan (`TOOLRECAP_V4_MIGRATION_PLAN.md`). The current workflow runs analysis → canonical Final JSON → downstream VoiceStudio/Audio Mix/render → publication through the authoritative Phase 12 resolver. `FINAL_JSON_READY` remains the zero-AI downstream boundary.
 
 ### Cumulative Progression:
 - **Phase 1 (Baseline Validated)**: Established independent V4 workspace with 215/215 tests passing, schema 3.0 immutable, Windows DPAPI secret persistence preserved.
@@ -35,7 +35,7 @@ This report documents the implementation and closure verification of **Phase 11*
 3. Root/nameless automatic paths, relative manual paths, path-as-file, unavailable shares/drives and mkdir failures raise `OutputDirectoryError` without fallback.
 4. Generated/imported Final JSON use the same downstream resolver; automatic paths are never persisted into the manual setting.
 5. Destination is created only at publication/downstream entry, not while Settings/source browsing/analysis runs.
-6. Managed Final JSON, narration cache and all analysis artifacts remain outside publication root; renderer temp work remains under managed render-work.
+6. Managed Final JSON, narration cache and all analysis artifacts remain outside publication root; renderer temp work remains under managed render-work, and neighbor publication staging files are removed on success, cancellation, or failure.
 7. Existing title naming, filename validation, source collision, fingerprint and output SHA checks remain. Unowned existing publication files are rejected rather than overwritten.
 8. Output-directory changes keep Final JSON/AI/narration valid; the current renderer rerenders at the new destination using cached narration.
 9. No packaging/updater acceptance or real production E2E work is included.
@@ -177,7 +177,7 @@ This report documents the implementation and closure verification of **Phase 11*
 | **Memory Boundedness** | `ENFORCED` | Audio energy reads 4096-frame chunks; no full WAV in memory. Image OCR operates on bounded subtitle crops, never full video frames. |
 | **Stream Indexing Integrity** | `ENFORCED` | `AudioSelection` maintains separate `global_index` and `audio_ordinal`. Error raised if map spec requested on missing audio. |
 | **Editorial Independence** | `CLEAN` | No editorial policy classes, cue-capping heuristics, or arbitrary time clamping injected into analysis/preparation. |
-| **Controlled Workflow Boundary**| `VERIFIED` | Fully configured nonzero analysis reaches `ProjectStatus.FINAL_JSON_READY` and stops before Phase 10/11; generated Final JSON exists before any downstream voice/render work. |
+| **Controlled Workflow Boundary**| `VERIFIED` | Fully configured analysis reaches `ProjectStatus.FINAL_JSON_READY`, the zero-AI boundary, then continues through VoiceStudio/Audio Mix/render and publishes through the Phase 12 resolver. |
 | **Scanner Editorial Isolation** | `VERIFIED` | Scanner receives no Recap Prompt, application ranking policy, candidate logic, output quota, video, whole audio, or arbitrary local path. |
 | **Stable Evidence Identity** | `VERIFIED` | IDs are application-owned, deterministic after sorted validated chunk artifacts, and scoped by project + evidence revision. |
 | **Full Evidence Retention** | `VERIFIED` | Range queries return every overlap in deterministic order; no top-K, fuzzy dedupe, story ranking, or character/subplot filtering. |
@@ -190,7 +190,7 @@ This report documents the implementation and closure verification of **Phase 11*
 | **Zero-AI Render Bypass** | `PRESERVED` | Projects with Final JSON execute render with exactly 0 source prep and 0 Gateway calls. |
 | **DPAPI Entropy** | `PRESERVED` | `OPTIONAL_ENTROPY = b"ToolRecapV3_DPAPI_SecretStorage_v1"` retained intact. |
 | **Schema Version** | `PRESERVED` | Schema 3.0 (`recap_v3_schema.json`) immutable. |
-| **Storage Isolation** | `PRESERVED` | All working state, prepared artifacts, and cache strictly under `%LOCALAPPDATA%\ToolRecapV4\`. |
+| **Storage Isolation** | `PRESERVED` | Internal working state, prepared artifacts, Final JSON, narration, and caches remain under `%LOCALAPPDATA%\ToolRecapV4\`; only intended user-facing render outputs are published to the resolved destination. |
 
 ---
 
@@ -225,8 +225,10 @@ All validation suites executed and passed cleanly:
 - Phase 10 settings/UI focused suite: **48 passed**, including secure migration, transactional rollback, diagnostics, dependency boundaries and real-Tk interaction tests.
 - Phase 11 closure full suite: **560 passed in 59.23s**, 0 failures, 0 errors, 0 skipped.
 - Phase 11 downstream-focused suite: **86 passed**, including 10 narration-cache/integration tests plus VoiceStudio, renderer, media and workflow regressions.
-- Phase 12 full suite: **569 passed in 62.91s**, 0 failures, 0 errors, 0 skipped.
-- Phase 12 resolver-focused suite: **9 passed**, plus generated/imported workflow and Phase 11 downstream regression coverage.
+- Phase 12 final closure full suite: **571 passed in 62.14s**, 0 failures, 0 errors, 0 skipped. The count increased from 569 only because closure added one three-output destination-resume test and one failed-publication staging-cleanup test.
+- Phase 12 resolver-focused suite: **10 passed in 1.08s**, plus generated/imported workflow and Phase 11 downstream regression coverage.
+- Phase 12 closure regressions: Phase 11 downstream **32 passed**; VoiceStudio **9 passed**; renderer **18 passed**; media **25 passed**; Phase 10 settings **46 passed**; Phase 9 **25 passed**; Phase 8 **20 passed**; Phase 7 **28 passed**; Phase 6 **35 passed**; Phase 5 **33 passed**; Phase 4 Scanner/Evidence **44 passed**; Phase 3 source preparation **106 passed**; Phase 2 Gateway **33 passed**.
+- A first Phase 9 subset invocation used pytest's deeply nested default Windows temp path and hit path-length `ENOENT` errors. The required short Windows-safe `--basetemp` rerun passed all **25** tests; no product code was changed for that environment-only result.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
   - `tests/test_analysis_ocr_stt.py`: 44 passed (OCR quality gate, crop validation, Vision OCR safety, model management, STT windowing, energy gating).
@@ -291,8 +293,10 @@ All validation suites executed and passed cleanly:
 - **AI Gateway settings UI and secure migration**: IMPLEMENTED in Phase 10.
 - **Voice/Audio Mix/render verification**: IMPLEMENTED in Phase 11 using deterministic mocks/synthetic media; no real production episode/season acceptance is claimed.
 - **Output Directory Resolver**: IMPLEMENTED in Phase 12.
-- **Packaging/updater acceptance and real episode/season E2E**: NOT implemented; remain later scope.
+- **Phase 13 packaging/selfcheck/updater acceptance**: NOT started.
+- **Real episode E2E**: NOT started; no real production episode acceptance is claimed.
+- **Real season E2E**: NOT started; no real production season acceptance is claimed.
 - **Output Writers**: IMPLEMENTED in Phase 8 as independent response-capture jobs.
 - **Executable Packaging**: Portable binary packaging via `build_portable.py` / PyInstaller was not run; no `dist/ToolRecapV4.exe` exists in this phase.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.
-- **Git state**: Phase 1–10 history is preserved. Phase 11 implementation is `b429cabc7560415ace2593686bd79092b0b5350b` (`feat: connect final json to voice and render`) and closure is `b77547a5981eeaf1323666c0ef62f7f24181e4c2` (`fix: close Phase 11 downstream gaps`). No remote or push is configured.
+- **Git state**: Phase 1–11 history is preserved. Phase 12 implementation is `1cce2e54fdab266c07d0322f423ecf1ecd329161` (`feat: add publication output resolver`) and its separate closure correction is `c73afdfc1a3689b23d7225bb9c02bc52ca779ee3` (`fix: close Phase 12 publication gaps`). No remote or push is configured.

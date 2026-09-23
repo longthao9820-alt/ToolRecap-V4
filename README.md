@@ -92,7 +92,7 @@ ToolRecap V4 là ứng dụng Windows Portable thế hệ mới tự động tó
 >   - Publication folder chỉ chứa video/SRT user-facing; Final JSON, Evidence, Vision, Writer, repair, narration cache và temp render vẫn ở managed storage.
 > - **Workflow kiểm soát chặt chẽ**:
 >   - Khi dự án đã có Final JSON hợp lệ hoặc được import từ trước: chạy thẳng vào luồng dựng (render), thực hiện chính xác 0 lượt gọi Gateway và 0 lượt chạy chuẩn bị nguồn.
->   - Khi các model cần thiết đã cấu hình: ... → independent Writers → targeted validation/repair → schema 3.0 Final JSON → `FINAL_JSON_READY`, sau đó dừng trước Phase 10/11.
+>   - Khi các model cần thiết đã cấu hình: ... → independent Writers → targeted validation/repair → schema 3.0 Final JSON → `FINAL_JSON_READY` (ranh giới downstream zero-AI) → VoiceStudio/Audio Mix/render → publication qua Phase 12 Output Directory Resolver.
 >   - Fresh install chưa cấu hình Scanner model dừng rõ ràng ở `PREPARED`; ID model là free text, provider-neutral. Settings cũ được migrate nguyên literal từ `gateway_sub_model`.
 > - **CHƯA CÓ CÁC TÍNH NĂNG PHASE 13+**: portable packaging/updater acceptance và real episode/season E2E CHƯA được triển khai.
 > - **CHƯA CÓ BẢN DỰNG EXE**: Chưa chạy đóng gói `build_portable.py` / PyInstaller; chưa có tệp `ToolRecapV4.exe` trong `dist/` hoặc bản nén trong `release/`.
@@ -162,7 +162,7 @@ Tất cả dữ liệu làm việc, cấu hình và tệp tạm được lưu ri
 - `checkpoints/`: Tiến trình từng bước (`checkpoints/<mã_dự_án>/<mã_checkpoint>.json`).
 - `settings/`: Cài đặt hệ thống (`settings/settings.json`, kho cập nhật `longthao9820-alt/ToolRecap-V4`).
 - `secrets/`: Khóa bí mật API mã hóa Windows DPAPI (`secrets/credentials.dpapi`).
-- `outputs/`: Video recap xuất ra (`outputs/<mã_dự_án>/`).
+- Video/SRT xuất bản không nằm trong managed state: manual output directory được dùng chính xác, hoặc khi để trống ứng dụng dùng sibling `Outputs_<tên working folder>`.
 
 ---
 
