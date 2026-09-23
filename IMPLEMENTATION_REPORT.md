@@ -195,7 +195,7 @@ All validation suites executed and passed cleanly:
 - Phase 8 closure focused coverage: **20 targeted Writer context/integrity/execution/cache/response-boundary tests** plus updated workflow/bypass assertions.
 - Phase 9 closure full suite: **526 passed in 67.39s**, 0 failures, 0 errors, 0 skipped.
 - Phase 9 focused coverage: **25 validation/repair/mapping/revision/zero-output tests** plus updated workflow/bypass assertions.
-- Phase 10 closure full suite: **550 passed in 64.97s**, 0 failures, 0 errors, 0 skipped (short Windows-safe isolated basetemp).
+- Phase 10 closure full suite: **550 passed in 93.75s**, 0 failures, 0 errors, 0 skipped (short Windows-safe isolated basetemp).
 - Phase 10 settings/UI focused suite: **48 passed**, including secure migration, transactional rollback, diagnostics, dependency boundaries and real-Tk interaction tests.
 - **Preserved Phase 3 Test Suite Breakdown (336-test baseline)**:
   - `tests/test_analysis_core_subtitles.py`: 19 passed (models, cue bounds, stream indexing, cache hashing, sidecar discovery).
@@ -259,8 +259,9 @@ All validation suites executed and passed cleanly:
 - **General scene Vision boundary**: Selective Planner-requested still-image Vision is implemented in Phase 7. Full-episode/season scans, video upload and arbitrary sampling remain prohibited.
 - **Writer validation/repair and Final JSON**: IMPLEMENTED in Phase 9.
 - **AI Gateway settings UI and secure migration**: IMPLEMENTED in Phase 10.
-- **Verified Voice/Audio Mix/render integration and Output Directory Resolver**: NOT implemented; remain later scope.
+- **Voice/Audio Mix/render verification**: NOT implemented; remains Phase 11.
+- **Output Directory Resolver**: NOT implemented; remains Phase 12.
 - **Output Writers**: IMPLEMENTED in Phase 8 as independent response-capture jobs.
 - **Executable Packaging**: Portable binary packaging via `build_portable.py` / PyInstaller was not run; no `dist/ToolRecapV4.exe` exists in this phase.
 - **AI Model Execution in Tests**: Unit and integration tests used mock/synthetic adapters and injected runners. Live GPU transcription and online model downloading were not invoked during testing.
-- **Git state**: Phase 1–9 history and Phase 10 implementation commit `cbe26e8` are preserved; closure corrections are committed separately. No remote or push is configured.
+- **Git state**: Phase 1–9 history is preserved. Phase 10 implementation is `cbe26e8d803c09b9d871196b733969a9f875e704` (`feat: add ai gateway settings ui`) and closure is `664b7a0d865c2d659e786d47f3ec731185bf288b` (`fix: close Phase 10 settings gaps`). No remote or push is configured.
