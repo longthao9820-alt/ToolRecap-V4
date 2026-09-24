@@ -471,15 +471,22 @@ def _stage_from_project(state: Mapping[str, Any]) -> str:
     return mapping.get(status, WorkflowStage.PREPARATION.value)
 
 
-def _latest_writer_manifest(persistence: ProjectPersistence, project_id: str) -> dict[str, Any] | None:
+def _latest_writer_manifest(
+    persistence: ProjectPersistence, project_id: str,
+    expected_plan_hash: str | None = None,
+) -> dict[str, Any] | None:
     root = persistence.projects_dir / project_id / "writers"
     if not root.is_dir():
         return None
-    candidates = sorted(
-        (path for path in root.glob("*/manifest.json") if path.is_file()),
-        key=lambda path: path.stat().st_mtime_ns,
-        reverse=True,
-    )
+    if expected_plan_hash:
+        exact = root / expected_plan_hash / "manifest.json"
+        candidates = [exact] if exact.is_file() else []
+    else:
+        candidates = sorted(
+            (path for path in root.glob("*/manifest.json") if path.is_file()),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
     for path in candidates:
         try:
             import json
@@ -575,6 +582,31 @@ def reconstruct_project_progress(
     for stage, checkpoint_id in checkpoints.items():
         data = _safe_checkpoint(persistence, project_id, checkpoint_id)
         if data and data.get("status") == "completed":
+            if stage == WorkflowStage.FINAL_PLAN.value:
+                path_value = None
+                try:
+                    import json
+                    from toolrecap_v4.analysis.finalizer.season_plan import SeasonPlanService
+                    from toolrecap_v4.analysis.finalizer.writer import find_locked_plan_artifact
+
+                    path_value = data.get("season_plan_path") or (state.get("season_plan") or {}).get("season_plan_path")
+                    plan_path = Path(path_value)
+                    plan_data = json.loads(plan_path.read_text(encoding="utf-8"))
+                    plan = SeasonPlanService._from_dict(plan_data)
+                    if data.get("plan_hash") != plan.plan_hash:
+                        raise ValueError("Season Plan checkpoint hash differs from plan content")
+                    find_locked_plan_artifact(persistence.root, plan)
+                except Exception as exc:
+                    pipeline[stage] = "retry" if path_value and Path(path_value).is_file() and not (Path(path_value).parent / "manifest.json").is_file() else "failed"
+                    snapshot["stage"] = stage
+                    snapshot["stage_label"] = STAGE_LABELS[stage]
+                    snapshot["state"] = ActivityState.FAILED.value if pipeline[stage] == "failed" else ActivityState.IDLE.value
+                    snapshot["activity_text"] = (
+                        "Season Plan checkpoint requires safe local recovery; press Continue."
+                        if pipeline[stage] == "retry" else "Season Plan checkpoint integrity error."
+                    )
+                    snapshot["error"] = str(exc)
+                    continue
             pipeline[stage] = "complete"
             checkpoint_data[stage] = data
     evidence = _safe_checkpoint(persistence, project_id, "evidence")
@@ -582,8 +614,9 @@ def reconstruct_project_progress(
         pipeline[WorkflowStage.SCANNER.value] = "complete"
         pipeline[WorkflowStage.EVIDENCE.value] = "complete"
 
-    current_stage = _stage_from_project(state)
-    writer_manifest = _latest_writer_manifest(persistence, project_id)
+    current_stage = snapshot.get("stage") if pipeline.get(WorkflowStage.FINAL_PLAN.value) in {"retry", "failed"} else _stage_from_project(state)
+    active_plan_hash = (state.get("season_plan") or {}).get("plan_hash") if isinstance(state.get("season_plan"), dict) else None
+    writer_manifest = _latest_writer_manifest(persistence, project_id, active_plan_hash)
     if status in {"failed", "cancelled"} and writer_manifest:
         expected = int(writer_manifest.get("expected_output_count", 0))
         completed_writer = int(writer_manifest.get("completed_response_count", 0))

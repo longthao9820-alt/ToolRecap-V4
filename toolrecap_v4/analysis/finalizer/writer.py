@@ -33,14 +33,19 @@ def validate_locked_plan(plan:SeasonPlan)->None:
     ids=[o.get("output_id") for o in plan.outputs]
     if len(ids)!=len(set(ids)) or ids!=[f"out_{i:03d}" for i in range(1,len(ids)+1)]:raise WriterRevisionError("Season Plan canonical output identities/order are invalid")
 
-def verify_locked_plan_artifact(root,plan:SeasonPlan)->None:
+def find_locked_plan_artifact(root,plan:SeasonPlan)->Path:
+    """Return the exact UTF-8 LOCKED artifact backing ``plan`` or fail closed."""
+    validate_locked_plan(plan)
     root=Path(root)/"projects"/plan.project_id/"plans"
     for path in root.glob("*/season_plan.json") if root.exists() else ():
         try:
-            data=json.loads(path.read_text());manifest=json.loads((path.parent/"manifest.json").read_text())
-            if data.get("plan_hash")==plan.plan_hash and data==plan.to_dict() and manifest.get("status")=="LOCKED" and manifest.get("plan_hash")==plan.plan_hash and manifest.get("artifact_hash")==_digest(data):return
+            data=json.loads(path.read_text(encoding="utf-8"));manifest=json.loads((path.parent/"manifest.json").read_text(encoding="utf-8"))
+            if data.get("plan_hash")==plan.plan_hash and data==plan.to_dict() and manifest.get("status")=="LOCKED" and manifest.get("plan_hash")==plan.plan_hash and manifest.get("artifact_hash")==_digest(data):return path
         except Exception:continue
     raise WriterRevisionError("Season Plan is not backed by a matching LOCKED artifact")
+
+def verify_locked_plan_artifact(root,plan:SeasonPlan)->None:
+    find_locked_plan_artifact(root,plan)
 
 def verify_visual_artifact(root,project_id:str,visual:VisualRunResult)->None:
     base=Path(root)/"projects"/project_id/"visual"/visual.visual_revision;data_path=base/"visual_evidence.json";manifest_path=base/"manifest.json"

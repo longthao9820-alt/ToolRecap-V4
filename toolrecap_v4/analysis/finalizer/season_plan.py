@@ -239,6 +239,128 @@ class SeasonPlanService:
                 continue
         return None
 
+    def _validate_recovery_candidate(
+        self, *, plan: SeasonPlan, catalog: SeasonEvidenceCatalog,
+        draft: PlannerDraft, visual: VisualRunResult, dependency_digest: str,
+        base: Path,
+    ) -> None:
+        """Prove an interrupted local plan commit without invoking the Gateway."""
+        from toolrecap_v4.analysis.finalizer.writer import validate_locked_plan
+
+        validate_locked_plan(plan)
+        expected = {
+            "project_id": catalog.project_id,
+            "catalog_hash": catalog.catalog_hash,
+            "evidence_revision": catalog.evidence_revision,
+            "visual_revision": visual.visual_revision,
+            "planner_draft_hash": _digest(draft.to_dict()),
+        }
+        for field, value in expected.items():
+            if getattr(plan, field) != value:
+                raise SeasonPlanLockError(f"Recoverable Season Plan {field} identity mismatch.")
+        if base.name != f"plan-{dependency_digest[:24]}":
+            raise SeasonPlanLockError("Season Plan revision directory does not match current dependencies.")
+
+        recovered_raw = self._load_latest_raw(base, dependency_digest)
+        if recovered_raw is None or hashlib.sha256(recovered_raw[1].encode("utf-8")).hexdigest() != plan.final_planner_response_hash:
+            raise SeasonPlanLockError("Season Plan is not backed by the accepted Final Planner response artifact.")
+
+        episodes = {item.episode_id: item for item in catalog.ordered_episodes}
+        evidence = {item.evidence_id: item for item in catalog.items}
+        visuals = {item.visual_evidence_id: item for item in visual.evidence}
+        planner_refs: set[str] = set()
+        for output in plan.outputs:
+            planner_ref = output.get("planner_ref")
+            if not isinstance(planner_ref, str) or not planner_ref.strip() or planner_ref in planner_refs:
+                raise SeasonPlanLockError("Season Plan contains invalid Planner output references.")
+            planner_refs.add(planner_ref)
+            episode_ids = output.get("episode_ids", [])
+            if not episode_ids or any(item not in episodes for item in episode_ids):
+                raise SeasonPlanLockError("Season Plan contains an unknown episode identity.")
+            for evidence_id in output.get("evidence_ids", []):
+                item = evidence.get(evidence_id)
+                if item is None or item.episode_id not in episode_ids:
+                    raise SeasonPlanLockError("Season Plan contains missing/mismatched Evidence references.")
+            for visual_id in output.get("visual_evidence_ids", []):
+                item = visuals.get(visual_id)
+                if item is None or item.project_id != plan.project_id or item.episode_id not in episode_ids:
+                    raise SeasonPlanLockError("Season Plan contains missing/mismatched Visual Evidence references.")
+            for source_range in output.get("source_ranges", []):
+                episode = episodes.get(source_range.get("episode_id")) if isinstance(source_range, dict) else None
+                start = source_range.get("start_ms") if isinstance(source_range, dict) else None
+                end = source_range.get("end_ms") if isinstance(source_range, dict) else None
+                if episode is None or episode.episode_id not in episode_ids or type(start) is not int or type(end) is not int or start < 0 or end <= start or end > episode.duration_ms:
+                    raise SeasonPlanLockError("Season Plan contains invalid source ranges.")
+
+        writer_manifest = self.root / "projects" / plan.project_id / "writers" / plan.plan_hash / "manifest.json"
+        if writer_manifest.is_file():
+            try:
+                writer_data = json.loads(writer_manifest.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise SeasonPlanLockError("Writer checkpoint for recoverable Season Plan is corrupt.") from exc
+            if writer_data.get("season_plan_hash") != plan.plan_hash or writer_data.get("expected_output_count") != len(plan.outputs):
+                raise SeasonPlanLockError("Writer checkpoint belongs to a different Season Plan identity.")
+
+    def _load_or_recover_lock(
+        self, *, plan_path: Path, manifest_path: Path, dependency_digest: str,
+        catalog: SeasonEvidenceCatalog, draft: PlannerDraft, visual: VisualRunResult,
+    ) -> SeasonPlanResult:
+        base = plan_path.parent
+        try:
+            plan_data = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan = self._from_dict(plan_data)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise SeasonPlanLockError("Existing Season Plan is missing, truncated, or corrupt; local lock recovery refused.") from exc
+
+        self._validate_recovery_candidate(
+            plan=plan, catalog=catalog, draft=draft, visual=visual,
+            dependency_digest=dependency_digest, base=plan_path.parent,
+        )
+        artifact_hash = _digest(plan_data)
+        manifest: dict[str, Any] | None = None
+        if manifest_path.is_file():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise SeasonPlanLockError("Season Plan LOCKED artifact is corrupt; local recovery refused.") from exc
+            if manifest.get("status") == "LOCKED":
+                if manifest.get("plan_hash") != plan.plan_hash or manifest.get("artifact_hash") != artifact_hash:
+                    raise SeasonPlanLockError("Season Plan LOCKED artifact hash/identity mismatch.")
+                stored_dependency = manifest.get("dependency_digest")
+                if stored_dependency not in (None, dependency_digest):
+                    raise SeasonPlanLockError("Season Plan LOCKED artifact references a different revision.")
+                if manifest.get("project_id") not in (None, plan.project_id):
+                    raise SeasonPlanLockError("Season Plan LOCKED artifact belongs to a different project.")
+                if manifest.get("revision") not in (None, base.name):
+                    raise SeasonPlanLockError("Season Plan LOCKED artifact references a different plan revision.")
+                if stored_dependency is None or manifest.get("project_id") is None or manifest.get("revision") is None:
+                    manifest = {
+                        **manifest, "dependency_digest": dependency_digest,
+                        "project_id": plan.project_id, "revision": base.name,
+                    }
+                    atomic_write_json(manifest_path, manifest)
+            elif manifest.get("status") == "BUILDING" and manifest.get("dependency_digest") in (None, dependency_digest):
+                manifest = None
+            else:
+                raise SeasonPlanLockError("Season Plan lock metadata is incomplete or belongs to a different revision.")
+
+        if manifest is None:
+            atomic_write_json(manifest_path, {
+                "status": "LOCKED", "dependency_digest": dependency_digest,
+                "artifact_hash": artifact_hash, "plan_hash": plan.plan_hash,
+                "project_id": plan.project_id, "revision": base.name,
+            })
+            self._emit(
+                state=ActivityState.LOCAL_PROCESSING.value,
+                activity_text=f"Recovered Season Plan checkpoint locally with {len(plan.outputs)} outputs.",
+                current_item="season-plan", completed=len(plan.outputs), total=len(plan.outputs),
+                unit="outputs", stage_status="complete",
+            )
+
+        from toolrecap_v4.analysis.finalizer.writer import find_locked_plan_artifact
+        find_locked_plan_artifact(self.root, plan)
+        return SeasonPlanResult(plan, plan_path, True)
+
     def _request_validated(
         self, *, base: Path, dependency_digest: str, prompt: str, project_id: str,
         catalog: SeasonEvidenceCatalog, visual: VisualRunResult,
@@ -319,20 +441,20 @@ class SeasonPlanService:
         base = self.root / "projects" / project_id / "plans" / revision
         plan_path = base / "season_plan.json"
         manifest_path = base / "manifest.json"
-        if plan_path.is_file() and manifest_path.is_file():
-            try:
-                plan_data = json.loads(plan_path.read_text(encoding="utf-8"))
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                if (manifest.get("status") == "LOCKED" and manifest.get("dependency_digest") == dependency_digest
-                    and _digest(plan_data) == manifest.get("artifact_hash")):
-                    self._emit(
-                        state=ActivityState.RUNNING.value,
-                        activity_text="Reused locked Season Plan checkpoint.",
-                        current_item="season-plan", reused=1, stage_status="complete",
-                    )
-                    return SeasonPlanResult(self._from_dict(plan_data), plan_path, True)
-            except (OSError, ValueError, KeyError, TypeError):
-                pass
+        if plan_path.is_file():
+            result = self._load_or_recover_lock(
+                plan_path=plan_path, manifest_path=manifest_path,
+                dependency_digest=dependency_digest, catalog=catalog,
+                draft=draft, visual=visual,
+            )
+            self._emit(
+                state=ActivityState.RUNNING.value,
+                activity_text="Reused locked Season Plan checkpoint.",
+                current_item="season-plan", reused=1, stage_status="complete",
+            )
+            return result
+        if manifest_path.is_file():
+            raise SeasonPlanLockError("Season Plan lock metadata exists but season_plan.json is missing; local recovery refused.")
 
         store = EvidenceStore(self.root, project_id)
         selected_ids = dict.fromkeys(
@@ -377,7 +499,10 @@ class SeasonPlanService:
         atomic_write_json(manifest_path, {
             "status": "LOCKED", "dependency_digest": dependency_digest,
             "artifact_hash": _digest(plan.to_dict()), "plan_hash": plan.plan_hash,
+            "project_id": plan.project_id, "revision": revision,
         })
+        from toolrecap_v4.analysis.finalizer.writer import find_locked_plan_artifact
+        find_locked_plan_artifact(self.root, plan)
         self._emit(
             state=ActivityState.LOCAL_PROCESSING.value,
             activity_text=f"Season Plan locked with {len(plan.outputs)} outputs.",

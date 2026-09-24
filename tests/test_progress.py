@@ -268,5 +268,5 @@ def test_reconstructs_catalog_plan_writer_and_final_json_checkpoints(tmp_path: P
     assert snapshot["current_item"] == "out_003"
     assert snapshot["pipeline"][WorkflowStage.CATALOG.value] == "complete"
     assert snapshot["pipeline"][WorkflowStage.PLANNER.value] == "complete"
-    assert snapshot["pipeline"][WorkflowStage.FINAL_PLAN.value] == "complete"
+    assert snapshot["pipeline"][WorkflowStage.FINAL_PLAN.value] == "failed"
     assert snapshot["pipeline"][WorkflowStage.FINAL_JSON.value] == "complete"
