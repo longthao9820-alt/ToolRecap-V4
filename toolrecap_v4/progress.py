@@ -559,7 +559,7 @@ def reconstruct_project_progress(
         snapshot["state"] = ActivityState.CANCELLED.value
     elif status == "completed":
         snapshot["state"] = ActivityState.COMPLETE.value
-    else:
+    elif snapshot.get("state") not in {ActivityState.FAILED.value,ActivityState.CANCELLED.value}:
         snapshot["state"] = ActivityState.IDLE.value
 
     pipeline = snapshot.setdefault("pipeline", _pipeline_default())

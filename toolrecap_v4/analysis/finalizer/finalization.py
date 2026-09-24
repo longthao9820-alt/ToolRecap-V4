@@ -16,45 +16,47 @@ from toolrecap_v4.errors import CancelledError,FinalJsonMappingError,FinalJsonVa
 from toolrecap_v4.gateway import GatewayClient
 from toolrecap_v4.persistence import ProjectPersistence,atomic_write_json
 from toolrecap_v4.validator import validate_project
+from toolrecap_v4.analysis.finalizer.writer_contract import (
+    SOURCE_CLIP_FIELDS,WRITER_DRAFT_VERSION,WRITER_ROOT_FIELDS,WRITER_SEGMENT_FIELDS,
+    parse_json_object,safely_unwrap_single_writer,validation_diagnostics,
+)
 
-VALIDATOR_VERSION="writer-validator-v1";MAPPING_VERSION="writer-to-final-json-v1";REPAIR_PROTOCOL_VERSION="writer-repair-v1"
+VALIDATOR_VERSION="writer-validator-v2";MAPPING_VERSION="writer-to-final-json-v1";REPAIR_PROTOCOL_VERSION="writer-repair-v2"
 def _canon(v):return json.dumps(v,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()
 def _digest(v):return hashlib.sha256(_canon(v)).hexdigest()
 
 @dataclass(frozen=True)
 class ValidationResult:
-    output_id:str;state:str;issues:tuple[str,...];normalized:dict[str,Any]|None;artifact_hash:str
+    output_id:str;state:str;issues:tuple[str,...];normalized:dict[str,Any]|None;artifact_hash:str;diagnostics:tuple[str,...]=()
 
 @dataclass(frozen=True)
 class FinalizationResult:
     final_json:dict[str,Any];revision:str;artifact_hash:str;validated_outputs:tuple[ValidationResult,...];repaired_output_ids:tuple[str,...];reused:bool
 
-def parse_writer_response(raw:str)->dict[str,Any]|None:
-    text=raw.strip()
-    if text.startswith("```"):
-        lines=text.splitlines()
-        if lines and lines[-1].strip()=="```":text="\n".join(lines[1:-1]);text=text.lstrip()[4:].lstrip() if text.lstrip().lower().startswith("json") else text
-    try:v=json.loads(text);return v if isinstance(v,dict) else None
-    except Exception:return None
+def parse_writer_response(raw:str,*,project_id:str|None=None,plan_hash:str|None=None,output_id:str|None=None)->dict[str,Any]|None:
+    value=parse_json_object(raw)
+    if value is None:return None
+    if project_id and plan_hash and output_id:
+        return safely_unwrap_single_writer(value,project_id,plan_hash,output_id) or value
+    return value
 
 class OutputValidator:
     def __init__(self,*,project_id:str,plan:SeasonPlan,episodes:Sequence[PreparedEpisode],visual:VisualRunResult,evidence_store:EvidenceStore):self.project_id=project_id;self.plan=plan;self.eps={e.episode_id:e for e in episodes};self.visual={v.visual_evidence_id:v for v in visual.evidence};self.store=evidence_store
     def validate(self,job:WriterJob,raw:str)->ValidationResult:
-        artifact_hash=hashlib.sha256(raw.encode()).hexdigest();d=parse_writer_response(raw);issues=[]
-        if d is None:return ValidationResult(job.output_id,"INVALID_REPAIRABLE",("MALFORMED_JSON",),None,artifact_hash)
-        required={"writer_draft_version","project_id","season_plan_hash","output_id","title","narration","segments","writer_notes"}
-        if set(d)!=required:issues.append("SCHEMA_FIELD_MISSING_OR_EXTRA")
-        if d.get("writer_draft_version")!="writer-draft-v1":issues.append("SCHEMA_VERSION_INVALID")
+        artifact_hash=hashlib.sha256(raw.encode("utf-8")).hexdigest();parsed=parse_json_object(raw);d=parse_writer_response(raw,project_id=self.project_id,plan_hash=self.plan.plan_hash,output_id=job.output_id);issues=[]
+        if d is None:return ValidationResult(job.output_id,"INVALID_REPAIRABLE",("MALFORMED_JSON",),None,artifact_hash,validation_diagnostics(("MALFORMED_JSON",),parsed))
+        if set(d)!=WRITER_ROOT_FIELDS:issues.append("SCHEMA_FIELD_MISSING_OR_EXTRA")
+        if d.get("writer_draft_version")!=WRITER_DRAFT_VERSION:issues.append("SCHEMA_VERSION_INVALID")
         if d.get("project_id")!=self.project_id:issues.append("PROJECT_ID_MISMATCH")
         if d.get("season_plan_hash")!=self.plan.plan_hash:issues.append("SEASON_PLAN_MISMATCH")
         if d.get("output_id")!=job.output_id:issues.append("OUTPUT_ID_MISMATCH")
         if not isinstance(d.get("title"),str) or not d.get("title","").strip():issues.append("MISSING_TITLE")
         narr=d.get("narration")
-        if not isinstance(narr,dict) or not isinstance(narr.get("text"),str) or not narr.get("text","").strip() or narr.get("text","").strip() in set(job.context.get("locked_output_order",[])):issues.append("MISSING_NARRATION")
+        if not isinstance(narr,dict) or set(narr)!={"text"} or not isinstance(narr.get("text"),str) or not narr.get("text","").strip() or narr.get("text","").strip() in set(job.context.get("locked_output_order",[])):issues.append("MISSING_NARRATION")
         segments=d.get("segments")
         if not isinstance(segments,list) or not segments:issues.append("SEGMENTS_REQUIRED");segments=[]
         seen=set();normalized=[];allowed_e={x["evidence_id"] for x in job.context["authoritative_full_evidence"]};allowed_v={x["visual_evidence_id"] for x in job.context["authoritative_visual_evidence"]};parents=job.context["source_ranges"]
-        fields={"segment_id","narration_text","episode_ids","evidence_ids","visual_evidence_ids","source_clips","editorial_intent","uncertainty"}
+        fields=WRITER_SEGMENT_FIELDS
         for idx,s in enumerate(segments):
             prefix=f"SEGMENT_{idx}"
             if not isinstance(s,dict) or set(s)!=fields:issues.append(f"{prefix}_SCHEMA_INVALID");continue
@@ -75,6 +77,7 @@ class OutputValidator:
             clean=[]
             for c in clips:
                 ep=self.eps.get(c.get("episode_id")) if isinstance(c,dict) else None
+                if not isinstance(c,dict) or set(c)!=SOURCE_CLIP_FIELDS:issues.append(f"{prefix}_SOURCE_CLIP_SCHEMA_INVALID")
                 if ep is None:issues.append("INVALID_EPISODE_ID");continue
                 if c.get("source_id")!=ep.source_id:issues.append("INVALID_SOURCE_ID")
                 start,end=c.get("start_ms"),c.get("end_ms")
@@ -87,7 +90,7 @@ class OutputValidator:
                 clean.append({"episode_id":ep.episode_id,"source_id":ep.source_id,"start_ms":start,"end_ms":end})
             normalized.append({**s,"source_clips":clean})
         issues=tuple(sorted(set(issues)))
-        if issues:return ValidationResult(job.output_id,"INVALID_REPAIRABLE",issues,None,artifact_hash)
+        if issues:return ValidationResult(job.output_id,"INVALID_REPAIRABLE",issues,None,artifact_hash,validation_diagnostics(issues,parsed))
         return ValidationResult(job.output_id,"VALID",(),{**d,"segments":normalized},artifact_hash)
 
 def map_final_json(*,project_id:str,project_name:str,episodes:Sequence[PreparedEpisode],plan:SeasonPlan,validated:Sequence[ValidationResult])->dict[str,Any]:

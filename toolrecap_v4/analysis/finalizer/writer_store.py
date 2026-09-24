@@ -53,7 +53,7 @@ class WriterStore:
     def output_dir(self, output_id: str) -> Path:
         return self.base / output_id
 
-    def inspect_output(self, output_id: str, *, allow_verifying: bool = False) -> tuple[bool, str]:
+    def inspect_output(self, output_id: str, *, allow_verifying: bool = False, require_contract_valid: bool = True) -> tuple[bool, str]:
         """Verify an output from persisted identities only, for restart reconstruction."""
         directory = self.output_dir(output_id)
         try:
@@ -62,6 +62,8 @@ class WriterStore:
             context = _read_json(directory / "context_manifest.json")
             raw = (directory / "raw_response.txt").read_bytes()
             if manifest.get("status") != "COMPLETE" and not (allow_verifying and manifest.get("status") == "VERIFYING"): return False, "incomplete checkpoint"
+            if require_contract_valid and manifest.get("writer_state") != "VALID": return False, "Writer Draft contract invalid"
+            if not require_contract_valid and manifest.get("writer_state") not in {"VALID","INVALID_REPAIRABLE","VERIFYING","COMPLETE"}: return False, "unknown Writer contract state"
             if manifest.get("artifact_version") != WRITER_ARTIFACT_VERSION or artifact.get("artifact_version") != WRITER_ARTIFACT_VERSION: return False, "unsupported artifact version"
             for value in (manifest, artifact, context):
                 if value.get("project_id") != self.project_id or value.get("plan_hash") != self.plan_hash or value.get("output_id") != output_id: return False, "wrong project/plan/output identity"
@@ -80,7 +82,7 @@ class WriterStore:
         except (ValueError, KeyError):
             return False, "artifact malformed"
 
-    def _artifact(self, job: WriterJob, raw: str, extraction_state: str, parsed: dict[str, Any] | None) -> dict[str, Any]:
+    def _artifact(self, job: WriterJob, raw: str, extraction_state: str, parsed: dict[str, Any] | None, contract_state: str, contract_issues: tuple[str,...]) -> dict[str, Any]:
         return {
             "artifact_version": WRITER_ARTIFACT_VERSION,
             "project_id": self.project_id,
@@ -91,10 +93,12 @@ class WriterStore:
             "response_hash": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
             "extraction_state": extraction_state,
             "parsed_json": parsed,
+            "contract_state": contract_state,
+            "contract_issues": list(contract_issues),
         }
 
-    def _verify_pair(self, job: WriterJob, directory: Path, *, allow_verifying: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
-        complete, reason = self.inspect_output(job.output_id, allow_verifying=allow_verifying)
+    def _verify_pair(self, job: WriterJob, directory: Path, *, allow_verifying: bool = False, require_contract_valid: bool = True) -> tuple[dict[str, Any], dict[str, Any]]:
+        complete, reason = self.inspect_output(job.output_id, allow_verifying=allow_verifying, require_contract_valid=require_contract_valid)
         if not complete:
             raise WriterPersistenceError(f"Writer artifact {job.output_id} validation failed: {reason}")
         manifest = _read_json(directory / "manifest.json")
@@ -113,6 +117,8 @@ class WriterStore:
             raise WriterPersistenceError(f"Writer artifact {job.output_id} response hash mismatch")
         if manifest.get("artifact_hash") != _digest(artifact):
             raise WriterPersistenceError(f"Writer artifact {job.output_id} artifact hash mismatch")
+        if manifest.get("writer_state") in {"VALID","INVALID_REPAIRABLE"} and artifact.get("contract_state") != manifest.get("writer_state"):
+            raise WriterPersistenceError(f"Writer artifact {job.output_id} contract state mismatch")
         if manifest.get("output_id") != job.output_id or manifest.get("plan_hash") != self.plan_hash or manifest.get("project_id") != self.project_id:
             raise WriterPersistenceError(f"Writer manifest {job.output_id} identity mismatch")
         context = _read_json(directory / "context_manifest.json")
@@ -128,6 +134,14 @@ class WriterStore:
             return WriterArtifact(job.output_id, job.dependency_digest, manifest["response_hash"], raw, artifact["extraction_state"], artifact.get("parsed_json"), manifest["request_bytes"], manifest["measurement"])
         except (OSError, ValueError, KeyError, UnicodeDecodeError, WriterPersistenceError):
             return None
+
+    def load_for_phase9(self, job: WriterJob) -> WriterArtifact | None:
+        directory=self.output_dir(job.output_id)
+        try:
+            manifest,artifact=self._verify_pair(job,directory,require_contract_valid=False)
+            raw=(directory/"raw_response.txt").read_text(encoding="utf-8")
+            return WriterArtifact(job.output_id,job.dependency_digest,manifest["response_hash"],raw,artifact["extraction_state"],artifact.get("parsed_json"),manifest["request_bytes"],manifest["measurement"])
+        except (OSError,ValueError,KeyError,UnicodeDecodeError,WriterPersistenceError):return None
 
     def load_received_raw(self, job: WriterJob) -> str | None:
         directory = self.output_dir(job.output_id)
@@ -151,13 +165,13 @@ class WriterStore:
         _atomic_bytes(directory / "raw_response.txt", encoded)
         atomic_write_json(directory / "manifest.json", {"status": "RECEIVED", "writer_state": "RESPONSE_RECEIVED", "artifact_version": WRITER_ARTIFACT_VERSION, "project_id": self.project_id, "plan_hash": self.plan_hash, "output_id": job.output_id, "dependency_digest": job.dependency_digest, "response_hash": hashlib.sha256(encoded).hexdigest(), "response_bytes": len(encoded), "full_response": True, "request_bytes": request_bytes, "measurement": measurement})
 
-    def save(self, job: WriterJob, raw: str, extraction_state: str, parsed: dict[str, Any] | None, request_bytes: int, measurement: dict[str, Any], max_bytes: int, cancellation_token: CancellationToken | None) -> WriterArtifact:
+    def save(self, job: WriterJob, raw: str, extraction_state: str, parsed: dict[str, Any] | None, request_bytes: int, measurement: dict[str, Any], max_bytes: int, cancellation_token: CancellationToken | None, contract_state: str="VALID", contract_issues: tuple[str,...]=()) -> WriterArtifact:
         directory = self.output_dir(job.output_id)
         if not (directory / "raw_response.txt").is_file():
             self.save_received_raw(job, raw, request_bytes, measurement, max_bytes)
         if cancellation_token:
             cancellation_token.check_cancelled()
-        artifact = self._artifact(job, raw, extraction_state, parsed)
+        artifact = self._artifact(job, raw, extraction_state, parsed, contract_state, contract_issues)
         context = {"artifact_version": WRITER_ARTIFACT_VERSION, "project_id": self.project_id, "plan_hash": self.plan_hash, "output_id": job.output_id, "request_id": job.request_id, "dependency_digest": job.dependency_digest, "context_hash": hashlib.sha256(_canonical(job.context)).hexdigest()}
         atomic_write_json(directory / "context_manifest.json", context)
         atomic_write_json(directory / "writer_draft.json", artifact)
@@ -167,27 +181,29 @@ class WriterStore:
             raise WriterPersistenceError(f"Writer artifact {job.output_id} read-back mismatch")
         manifest = {"status": "VERIFYING", "writer_state": "VERIFYING", "artifact_version": WRITER_ARTIFACT_VERSION, "project_id": self.project_id, "plan_hash": self.plan_hash, "output_id": job.output_id, "dependency_digest": job.dependency_digest, "artifact_hash": _digest(artifact), "response_hash": artifact["response_hash"], "response_bytes": len(raw.encode("utf-8")), "full_response": True, "extraction_state": extraction_state, "request_bytes": request_bytes, "measurement": measurement}
         atomic_write_json(directory / "manifest.json", manifest)
-        persisted_manifest, persisted_artifact = self._verify_pair(job, directory, allow_verifying=True)
+        persisted_manifest, persisted_artifact = self._verify_pair(job, directory, allow_verifying=True, require_contract_valid=False)
         if persisted_artifact != artifact or persisted_manifest != manifest:
             raise WriterPersistenceError(f"Writer artifact {job.output_id} final verification mismatch")
-        manifest = {**manifest, "status": "COMPLETE", "writer_state": "COMPLETE"}
+        manifest = {**manifest, "status": "COMPLETE", "writer_state": contract_state, "contract_issues": list(contract_issues)}
         atomic_write_json(directory / "manifest.json", manifest)
-        persisted_manifest, persisted_artifact = self._verify_pair(job, directory)
+        persisted_manifest, persisted_artifact = self._verify_pair(job, directory, require_contract_valid=contract_state=="VALID")
         if persisted_artifact != artifact or persisted_manifest != manifest:
             raise WriterPersistenceError(f"Writer artifact {job.output_id} COMPLETE verification mismatch")
         return WriterArtifact(job.output_id, job.dependency_digest, artifact["response_hash"], raw, extraction_state, parsed, request_bytes, measurement)
 
     def save_project_manifest(self, plan_hash: str, output_ids: list[str], artifacts: dict[str, WriterArtifact], failures: dict[str, str]) -> dict[str, Any]:
-        durable_ids: list[str] = []
+        durable_ids: list[str] = [];valid_ids: list[str] = []
         for ordinal, output_id in enumerate(output_ids, 1):
             artifact = artifacts.get(output_id)
             if artifact is None:
                 continue
             probe = WriterJob(output_id, ordinal, artifact.dependency_digest, {}, "")
-            if self.load(probe) is not None:
+            if self.load_for_phase9(probe) is not None:
                 durable_ids.append(output_id)
+                if self.load(probe) is not None:valid_ids.append(output_id)
             else:
                 failures.setdefault(output_id, "durable Writer artifact read-back verification failed")
-        data = {"artifact_version": WRITER_ARTIFACT_VERSION, "status": "COMPLETE" if len(durable_ids) == len(output_ids) and not failures else "INCOMPLETE", "writer_state": "COMPLETE" if len(durable_ids) == len(output_ids) and not failures else "RETRY_REQUIRED", "project_id": self.project_id, "season_plan_hash": plan_hash, "expected_output_count": len(output_ids), "ordered_output_ids": output_ids, "completed_response_count": len(durable_ids), "pending_count": len(output_ids) - len(durable_ids) - len(failures), "failed_count": len(failures), "canceled_count": 0, "outputs": {oid: {"dependency_digest": artifacts[oid].dependency_digest, "response_hash": artifacts[oid].response_hash, "extraction_state": artifacts[oid].extraction_state} for oid in durable_ids}, "failures": failures}
+        state="COMPLETE" if len(valid_ids)==len(output_ids) and not failures else "REPAIR_REQUIRED" if len(durable_ids)==len(output_ids) and not failures else "INCOMPLETE"
+        data = {"artifact_version": WRITER_ARTIFACT_VERSION, "status": state, "writer_state": state, "project_id": self.project_id, "season_plan_hash": plan_hash, "expected_output_count": len(output_ids), "ordered_output_ids": output_ids, "completed_response_count": len(valid_ids), "durable_response_count":len(durable_ids), "pending_count": len(output_ids) - len(durable_ids) - len(failures), "failed_count": len(failures), "canceled_count": 0, "outputs": {oid: {"dependency_digest": artifacts[oid].dependency_digest, "response_hash": artifacts[oid].response_hash, "extraction_state": artifacts[oid].extraction_state} for oid in durable_ids}, "failures": failures}
         atomic_write_json(self.base / "manifest.json", data)
         return data

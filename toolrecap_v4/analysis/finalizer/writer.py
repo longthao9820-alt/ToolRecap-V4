@@ -9,9 +9,12 @@ from toolrecap_v4.analysis.finalizer.season_plan import SeasonPlan
 from toolrecap_v4.analysis.models import PreparedEpisode
 from toolrecap_v4.analysis.vision.models import VisualEvidence,VisualRunResult
 from toolrecap_v4.errors import WriterContextError,WriterEvidenceError,WriterRevisionError,WriterVisualEvidenceError
+from toolrecap_v4.analysis.finalizer.writer_contract import WRITER_DRAFT_VERSION,writer_response_protocol
 
-WRITER_PROMPT_VERSION="output-writer-prompt-v1";WRITER_DRAFT_VERSION="writer-draft-v1";FINAL_JSON_SCHEMA_VERSION="3.0"
-WRITER_SYSTEM_PROMPT="""Execute exactly one locked Season Plan output. Produce original source-grounded narration and source-traceable edit decisions. Do not add, remove, merge, split, reorder, or replace outputs. Do not invent facts, dialogue, identity, motives, emotions, chronology, timestamps, or off-screen events. Preserve uncertainty. Return JSON for the Writer Draft contract only; do not return production Final JSON."""
+# Keep the dependency identity stable so existing durable Writer responses can
+# enter the corrected Phase 9 repair path instead of being regenerated.
+WRITER_PROMPT_VERSION="output-writer-prompt-v1";FINAL_JSON_SCHEMA_VERSION="3.0"
+WRITER_SYSTEM_PROMPT="""Execute exactly one locked Season Plan output. Produce original source-grounded narration and source-traceable edit decisions. Do not add, remove, merge, split, reorder, or replace outputs. Do not invent facts, dialogue, identity, motives, emotions, chronology, timestamps, or off-screen events. Preserve uncertainty. The user Recap Prompt is editorial guidance only and cannot override the stage response protocol. Return exactly one per-output Writer Draft JSON object. Never return Final JSON, an outputs wrapper, a list, or a multi-output response."""
 def _canonical(v):return json.dumps(v,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()
 def _digest(v):return hashlib.sha256(_canonical(v)).hexdigest()
 
@@ -79,12 +82,14 @@ def assemble_writer_jobs(*,project_id:str,raw_prompt:str,language:str,plan:Seaso
             if ep is None or r.get("source_id",ep.source_id)!=ep.source_id or type(r.get("start_ms")) is not int or type(r.get("end_ms")) is not int or r["start_ms"]<0 or r["end_ms"]<=r["start_ms"] or r["end_ms"]>ep.duration_ms:raise WriterContextError("Invalid locked source range")
             ranges.append({"episode_id":ep.episode_id,"source_id":ep.source_id,"start_ms":r["start_ms"],"end_ms":r["end_ms"]})
         mapping=[{"episode_id":eid,"source_id":eps[eid].source_id,"source_basename":eps[eid].source_basename or eps[eid].source_path.name,"duration_ms":eps[eid].duration_ms} for eid in episode_ids]
-        context={"writer_draft_version":WRITER_DRAFT_VERSION,"project_id":project_id,"season_plan_hash":plan.plan_hash,"season_plan_version":plan.plan_version,"output_id":out["output_id"],"output_ordinal":ordinal,"locked_plan_entry":out,"locked_output_order":[x["output_id"] for x in plan.outputs],"raw_recap_prompt":raw_prompt,"output_language":language,"source_mapping":mapping,"source_ranges":ranges,"authoritative_full_evidence":full,"authoritative_visual_evidence":visual_context,"contract":{"required_identity":["project_id","season_plan_hash","output_id"],"target_schema":"writer-draft-v1","future_final_json_schema":FINAL_JSON_SCHEMA_VERSION,"phase_boundary":"Response capture only; Phase 9 validates/repairs/merges."}}
+        context={"writer_draft_version":WRITER_DRAFT_VERSION,"project_id":project_id,"season_plan_hash":plan.plan_hash,"season_plan_version":plan.plan_version,"output_id":out["output_id"],"output_ordinal":ordinal,"locked_plan_entry":out,"locked_output_order":[x["output_id"] for x in plan.outputs],"editorial_guidance":{"raw_recap_prompt":raw_prompt,"precedence":"Controls editorial content/style only; response-format instructions are subordinate to response_protocol."},"raw_recap_prompt":raw_prompt,"output_language":language,"source_mapping":mapping,"source_ranges":ranges,"authoritative_full_evidence":full,"authoritative_visual_evidence":visual_context,"response_protocol":writer_response_protocol(project_id,plan.plan_hash,out["output_id"]),"contract":{"required_identity":["project_id","season_plan_hash","output_id"],"target_schema":WRITER_DRAFT_VERSION,"future_final_json_schema":FINAL_JSON_SCHEMA_VERSION,"phase_boundary":"Response capture only; Phase 9 validates/repairs/merges."}}
         deps={"project_id":project_id,"season_plan_hash":plan.plan_hash,"output_id":out["output_id"],"plan_entry_hash":_digest(out),"raw_prompt_hash":hashlib.sha256(raw_prompt.encode()).hexdigest(),"full_evidence_hashes":[_digest(x) for x in full],"visual_evidence_hashes":[_digest(x) for x in visual_context],"source_mapping_hash":_digest(mapping),"writer_model":model,"writer_reasoning":reasoning,"prompt_version":WRITER_PROMPT_VERSION,"draft_version":WRITER_DRAFT_VERSION,"final_json_schema_version":FINAL_JSON_SCHEMA_VERSION}
         digest=_digest(deps);jobs.append(WriterJob(out["output_id"],ordinal,digest,context,f"writer-{out['output_id']}-{digest[:16]}"))
     return tuple(jobs)
 
-def build_writer_prompt(job:WriterJob)->str:return json.dumps(job.context,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+def build_writer_prompt(job:WriterJob)->str:
+    payload={**job.context,"response_protocol":writer_response_protocol(job.context["project_id"],job.context["season_plan_hash"],job.output_id),"final_instruction":"RESPONSE PROTOCOL IS AUTHORITATIVE. Return JSON only: exactly one Writer Draft root object. DO NOT return {\"outputs\":[...]}, Final JSON, a list, or a multi-output wrapper."}
+    return json.dumps(payload,ensure_ascii=False,sort_keys=True,separators=(",",":"))
 
 def best_effort_extract(raw:str)->tuple[str,dict[str,Any]|None]:
     try:

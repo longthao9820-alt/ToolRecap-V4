@@ -72,7 +72,15 @@ def test_progress_only_reports_durable_writer_completion(tmp_path: Path) -> None
     outputs = [output("out_001", eids=["E01-EV-001"]), output("out_002", eids=["E01-EV-001"])]
     store, episodes, plan, visual = setup(tmp_path, outputs=outputs)
     events: list[dict] = []
-    service = WriterService(Gateway(fail="out_002"), tmp_path, WriterConfig("model"), progress_callback=events.append)
+    from test_finalization_phase9 import valid_writer
+    from toolrecap_v4.gateway import GatewayResult
+    class OneValidGateway(Gateway):
+        def submit_text_chat(self,**kwargs):
+            prompt=json.loads(kwargs["prompt"]);output_id=prompt["output_id"]
+            if output_id=="out_002":raise WriterTransportError("failed")
+            value=valid_writer(output_id);value["season_plan_hash"]=prompt["season_plan_hash"]
+            return GatewayResult(raw_response=json.dumps(value),bytes_sent=1,metadata={"status_code":200})
+    service = WriterService(OneValidGateway(), tmp_path, WriterConfig("model"), progress_callback=events.append)
     with pytest.raises(WriterTransportError):
         service.run(project_id="project-1", raw_prompt="p", language="en", plan=plan, episodes=episodes, visual=visual)
     completion_events = [event for event in events if event.get("item_event") == "complete"]
@@ -80,4 +88,3 @@ def test_progress_only_reports_durable_writer_completion(tmp_path: Path) -> None
     assert completion_events[0]["completed"] == 1
     assert completion_events[0]["total"] == 2
     assert not any(event.get("activity_text") == "All Writer outputs are complete." for event in events)
-
