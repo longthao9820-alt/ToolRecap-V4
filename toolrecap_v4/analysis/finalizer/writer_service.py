@@ -28,7 +28,7 @@ class WriterService:
         if cached:return cached,True
         recovered=store.load_received_raw(job)
         if recovered is not None:
-            state,parsed=best_effort_extract(recovered);meta=json.loads((store.output_dir(job.output_id)/"manifest.json").read_text());return store.save(job,recovered,state,parsed,meta["request_bytes"],meta["measurement"],self.config.max_response_bytes,token),True
+            state,parsed=best_effort_extract(recovered);meta=json.loads((store.output_dir(job.output_id)/"manifest.json").read_text(encoding="utf-8"));return store.save(job,recovered,state,parsed,meta["request_bytes"],meta["measurement"],self.config.max_response_bytes,token),True
         if token:token.check_cancelled()
         prompt=build_writer_prompt(job);measured=measure_text_request_bytes(model=self.config.model,reasoning=self.config.reasoning,user_prompt=prompt,system_prompt=WRITER_SYSTEM_PROMPT)
         if self.config.max_request_bytes is not None and measured>self.config.max_request_bytes:raise WriterCapacityError(f"Complete Writer context for {job.output_id} exceeds configured capacity")
@@ -62,10 +62,13 @@ class WriterService:
                         a,was_reused=f.result();artifacts[j.output_id]=a;reused+=int(was_reused);requested+=int(not was_reused)
                         self._emit(state=ActivityState.RUNNING.value,activity_text=(f"Reused Writer checkpoint for {j.output_id}." if was_reused else f"Writer {j.output_id} completed and checkpointed."),output_id=j.output_id,current_item=j.output_id,completed=len(artifacts),total=len(jobs),unit="outputs",reused=reused,item_event="complete",item_key=j.output_id,item_reused=was_reused)
                     except CancelledError:raise
-                    except Exception as exc:failures[j.output_id]=str(exc)
+                    except Exception as exc:
+                        failures[j.output_id]=str(exc)
+                        self._emit(state=ActivityState.RETRYING.value,activity_text=f"Writer artifact validation failed for {j.output_id}; retry required: {str(exc)[:180]}",output_id=j.output_id,current_item=j.output_id,completed=len(artifacts),total=len(jobs),unit="outputs")
                     try:n=next(iterator);active[pool.submit(self._run_one,n,store,cancellation_token)]=n
                     except StopIteration:pass
         manifest=store.save_project_manifest(plan.plan_hash,[j.output_id for j in jobs],artifacts,failures)
-        if failures:raise WriterTransportError(f"Writer stage incomplete: {failures}")
+        if failures:
+            raise WriterTransportError(f"Writer stage incomplete: {failures}")
         self._emit(state=ActivityState.LOCAL_PROCESSING.value,activity_text="All Writer outputs are complete.",completed=len(jobs),total=len(jobs),unit="outputs",reused=reused,stage_status="complete")
         return WriterRunResult(plan.plan_hash,tuple(artifacts[j.output_id] for j in jobs),manifest,reused,requested)

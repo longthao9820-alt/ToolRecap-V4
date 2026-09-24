@@ -316,6 +316,8 @@ class MainWindow(tk.Tk):
         self._gpu_detect_job: Optional[str] = None
         self._close_job: Optional[str] = None
         self._activity_timer_job: Optional[str] = None
+        self._dots_job: Optional[str] = None
+        self._dots_phase = 1
         self.active_modal: Optional[tk.Toplevel] = None
         self._shutting_down = False
 
@@ -337,6 +339,7 @@ class MainWindow(tk.Tk):
         self.activity_item_var = tk.StringVar(value="—")
         self.activity_progress_var = tk.StringVar(value="Progress not yet measurable")
         self.activity_text_var = tk.StringVar(value="Ready")
+        self.activity_dots_var = tk.StringVar(value="")
         self.activity_stage_time_var = tk.StringVar(value="0 minutes")
         self.activity_session_time_var = tk.StringVar(value="0 minutes")
         self.activity_project_time_var = tk.StringVar(value="Unavailable")
@@ -504,6 +507,9 @@ class MainWindow(tk.Tk):
         self.progressbar = ttk.Progressbar(primary, variable=self.progress_var, maximum=100)
         self.progressbar.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(7, 4))
         self._progress_indeterminate = False
+        self.activity_dots_label = ttk.Label(primary, textvariable=self.activity_dots_var, foreground="#555")
+        self.activity_dots_label.grid(row=5, column=0, columnspan=2, sticky="w", pady=(7, 4))
+        self.activity_dots_label.grid_remove()
 
         ttk.Label(primary, textvariable=self.pipeline_var, wraplength=630, foreground="#555").grid(
             row=6, column=0, columnspan=2, sticky="w", pady=(2, 5),
@@ -1164,6 +1170,29 @@ class MainWindow(tk.Tk):
         self._render_activity_snapshot(timer_only=True)
         self._activity_timer_job = safe_after(self, 1000, self._update_activity_timer)
 
+    def _start_activity_dots(self) -> None:
+        if self._dots_job is None:
+            self._dots_phase = 1
+            self._animate_activity_dots()
+
+    def _animate_activity_dots(self) -> None:
+        if getattr(self, "_is_closed", False) or not self._activity_snapshot.get("active"):
+            self._dots_job = None
+            return
+        base = str(self._activity_snapshot.get("activity_text") or "Working")
+        self.activity_dots_var.set(base + "." * self._dots_phase)
+        self._dots_phase = 1 if self._dots_phase >= 3 else self._dots_phase + 1
+        self._dots_job = safe_after(self, 700, self._animate_activity_dots)
+
+    def _stop_activity_dots(self) -> None:
+        if self._dots_job:
+            try:
+                self.after_cancel(self._dots_job)
+            except Exception:
+                pass
+            self._dots_job = None
+        self.activity_dots_var.set("")
+
     def _render_activity_snapshot(self, *, timer_only: bool = False) -> None:
         snapshot = self._activity_snapshot
         state = str(snapshot.get("state") or ActivityState.IDLE.value)
@@ -1212,6 +1241,9 @@ class MainWindow(tk.Tk):
                     self.progressbar.stop()
                     self._progress_indeterminate = False
                 self.progressbar.config(mode="determinate")
+                self.progressbar.grid()
+                self.activity_dots_label.grid_remove()
+                self._stop_activity_dots()
             else:
                 progress_text = f"0 / 0 {unit} — Not required"
                 self.progress_var.set(0.0)
@@ -1219,15 +1251,19 @@ class MainWindow(tk.Tk):
                     self.progressbar.stop()
                     self._progress_indeterminate = False
                 self.progressbar.config(mode="determinate")
+                self.progressbar.grid()
+                self.activity_dots_label.grid_remove()
+                self._stop_activity_dots()
         else:
             progress_text = "In progress — total not yet known" if snapshot.get("active") else "Progress not yet measurable"
-            self.progressbar.config(mode="indeterminate")
-            if snapshot.get("active") and not self._progress_indeterminate:
-                self.progressbar.start(12)
-                self._progress_indeterminate = True
-            elif not snapshot.get("active") and self._progress_indeterminate:
-                self.progressbar.stop()
-                self._progress_indeterminate = False
+            self.progressbar.stop()
+            self.progressbar.grid_remove()
+            self._progress_indeterminate = False
+            if snapshot.get("active"):
+                self.activity_dots_label.grid()
+                self._start_activity_dots()
+            else:
+                self._stop_activity_dots()
         self.activity_progress_var.set(progress_text)
 
         short_labels = {
@@ -1564,7 +1600,7 @@ class MainWindow(tk.Tk):
 
     def cancel_owned_after(self) -> None:
         """Cancel pending after() callbacks owned by this window."""
-        for job_attr in ("_poll_job", "_gpu_detect_job", "_close_job", "_activity_timer_job"):
+        for job_attr in ("_poll_job", "_gpu_detect_job", "_close_job", "_activity_timer_job", "_dots_job"):
             job = getattr(self, job_attr, None)
             if job:
                 try:

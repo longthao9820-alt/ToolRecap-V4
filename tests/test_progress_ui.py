@@ -73,7 +73,10 @@ def test_indeterminate_wait_repair_failure_and_completion_summary(tmp_path: Path
             activity_text="Waiting for Planner response...",
         )
         app._handle_worker_message(WorkerMessage("activity", waiting))
-        assert str(app.progressbar.cget("mode")) == "indeterminate"
+        app.update_idletasks()
+        app.update()
+        assert not app.progressbar.winfo_ismapped()
+        assert app.activity_dots_label.winfo_ismapped()
         assert "total not yet known" in app.activity_progress_var.get()
         assert app.activity_eta_var.get() == "Unknown"
 
@@ -132,5 +135,34 @@ def test_zero_visual_and_voice_cache_reuse_labels_are_truthful(tmp_path: Path) -
         )))
         assert "reused: 7" in app.activity_progress_var.get()
         assert "reused from cache" in app.activity_text_var.get()
+    finally:
+        app.destroy()
+
+
+def test_unknown_progress_uses_three_dot_text_and_stops_without_heartbeat_activity(tmp_path: Path) -> None:
+    app = MainWindow(persistence=ProjectPersistence(tmp_path))
+    try:
+        app.current_project_id = "p1"
+        snapshot = _snapshot(
+            state=ActivityState.WAITING_FOR_AI.value, stage="planner",
+            stage_label="Planning Episode and Season Stories", completed=None, total=None,
+            activity_text="Waiting for Planner response",
+        )
+        app._handle_worker_message(WorkerMessage("activity", snapshot))
+        first = app.activity_dots_var.get()
+        app._animate_activity_dots()
+        second = app.activity_dots_var.get()
+        app._animate_activity_dots()
+        third = app.activity_dots_var.get()
+        assert first.endswith(".")
+        assert second.endswith("..")
+        assert third.endswith("...")
+        last_activity = app.activity_last_var.get()
+        app._handle_worker_message(WorkerMessage("activity_patch", {
+            "state": ActivityState.COMPLETE.value, "active": False,
+            "activity_text": "Planner complete", "completed": 3, "total": 3,
+        }))
+        assert app.activity_dots_var.get() == ""
+        assert app.activity_last_var.get() == last_activity
     finally:
         app.destroy()

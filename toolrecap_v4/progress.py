@@ -617,6 +617,13 @@ def reconstruct_project_progress(
     current_stage = snapshot.get("stage") if pipeline.get(WorkflowStage.FINAL_PLAN.value) in {"retry", "failed"} else _stage_from_project(state)
     active_plan_hash = (state.get("season_plan") or {}).get("plan_hash") if isinstance(state.get("season_plan"), dict) else None
     writer_manifest = _latest_writer_manifest(persistence, project_id, active_plan_hash)
+    if writer_manifest and active_plan_hash:
+        from toolrecap_v4.analysis.finalizer.writer_store import WriterStore
+
+        store = WriterStore(persistence.root, project_id, active_plan_hash)
+        output_ids = writer_manifest.get("ordered_output_ids") if isinstance(writer_manifest.get("ordered_output_ids"), list) else []
+        durable_ids = [output_id for output_id in output_ids if store.inspect_output(output_id)[0]]
+        writer_manifest = {**writer_manifest, "completed_response_count": len(durable_ids), "durable_output_ids": durable_ids}
     if status in {"failed", "cancelled"} and writer_manifest:
         expected = int(writer_manifest.get("expected_output_count", 0))
         completed_writer = int(writer_manifest.get("completed_response_count", 0))

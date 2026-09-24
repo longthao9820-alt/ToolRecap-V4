@@ -32,7 +32,7 @@ class FinalizationService:
         writer_store=WriterStore(self.root,project_id,plan.plan_hash);artifacts=[]
         for job in jobs:
             a=writer_store.load(job)
-            if a is None:raise WriterValidationError("Missing/corrupt Phase 8 Writer artifact",output_id=job.output_id,issue_codes=("WRITER_ARTIFACT_MISSING",))
+            if a is None:raise WriterValidationError(f"Writer artifact validation failed: {job.output_id}; missing, corrupt, or incomplete checkpoint",output_id=job.output_id,issue_codes=("WRITER_ARTIFACT_MISSING",))
             artifacts.append(a)
         deps={"project_id":project_id,"plan_hash":plan.plan_hash,"writer_hashes":[a.response_hash for a in artifacts],"validator":VALIDATOR_VERSION,"mapping":MAPPING_VERSION,"schema":"3.0","repair_model":self.config.repair_model,"repair_reasoning":self.config.repair_reasoning,"repair_protocol":REPAIR_PROTOCOL_VERSION}
         dependency_digest=_digest(deps);root=self.root/"projects"/project_id/"finalization";pointer=root/f"active-{dependency_digest[:24]}.json"
