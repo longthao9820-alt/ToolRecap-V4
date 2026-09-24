@@ -306,13 +306,13 @@ def test_multisource_integration_acceptance(tmp_path: Path, synthetic_sources):
         "Season_Recap_01.original.srt",
     ]
 
-    # 2. Verify streams and duration (2000ms + 1500ms + 1500ms = 5000ms = 5.0s)
+    # 2. Fixed-speed narration is authoritative; visual allocations fit actual audio.
     probe = probe_media(res.output_path)
     assert probe.has_video is True
     assert probe.has_audio is True
     assert probe.width == 1280
     assert probe.height == 720
-    assert probe.duration == pytest.approx(5.0, abs=0.2)
+    assert probe.duration == pytest.approx(3.9, abs=0.2)
 
     # Audio format check
     audio_info = probe.audio_streams[0]
@@ -337,21 +337,21 @@ def test_multisource_integration_acceptance(tmp_path: Path, synthetic_sources):
     assert narr_cues[0].end_ms == 1200
     assert narr_cues[0].text == "First scene begins in the garden."
 
-    # Seg 2: timeline offset = 2000ms
-    assert narr_cues[1].start_ms == 2000 + 100  # 2100ms
-    assert narr_cues[1].end_ms == 2000 + 1300   # 3300ms
+    # Seg 2: timeline offset follows fixed-speed narration duration of seg_01.
+    assert narr_cues[1].start_ms == 1200 + 100
+    assert narr_cues[1].end_ms == 1200 + 1300
     assert narr_cues[1].text == "A quiet moment passes."
 
     # Original dialogue has 1 cue (from seg_03)
     assert len(orig_cues) == 1
-    # Seg 3: timeline offset = 2000ms + 1500ms = 3500ms
-    assert orig_cues[0].start_ms == 3500 + 200  # 3700ms
-    assert orig_cues[0].end_ms == 3500 + 1400   # 4900ms
+    # Seg 3: timeline offset follows seg_01 + seg_02 narration durations.
+    assert orig_cues[0].start_ms == 2400 + 200
+    assert orig_cues[0].end_ms == 2400 + 1400
     assert orig_cues[0].text == "Who is out there?"
 
 
-def test_narration_fit_policy_oversize_fails_never_trims(tmp_path: Path, synthetic_sources):
-    """Invariant: Narration audio longer than segment visual duration must fail NarrationFitError."""
+def test_narration_fit_policy_oversize_extends_and_holds(tmp_path: Path, synthetic_sources):
+    """Fixed-speed narration expands the render timeline instead of changing voice speed."""
     out_dir = tmp_path / "output_oversize"
     out_dir.mkdir()
 
@@ -375,19 +375,8 @@ def test_narration_fit_policy_oversize_fails_never_trims(tmp_path: Path, synthet
         ],
     }
 
-    with pytest.raises(NarrationFitError) as exc_info:
-        render_output(
-            output_def=output_def,
-            source_paths=synthetic_sources,
-            output_dir=out_dir,
-            voice_adapter=voice_mock,
-        )
-
-    assert "exceeds visual segment duration" in str(exc_info.value)
-    assert "Trimming or altering editorial clips is strictly prohibited" in str(exc_info.value)
-
-    # Verify no partial published files
-    assert list(out_dir.iterdir()) == []
+    result = render_output(output_def=output_def, source_paths=synthetic_sources, output_dir=out_dir, voice_adapter=voice_mock)
+    assert result.duration == pytest.approx(3.0, abs=0.2)
 
 
 def test_source_collision_error_prevents_overwrite(tmp_path: Path, synthetic_sources):

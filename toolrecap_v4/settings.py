@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional
 from toolrecap_v4.persistence import ProjectPersistence, get_storage_root
 
 REASONING_VALUES = ("", "low", "medium", "high")
+COMMENTARY_SPEED_VALUES = tuple(round(0.80 + index * 0.05, 2) for index in range(11))
 
 
 @dataclass(frozen=True)
@@ -123,7 +124,7 @@ class GatewaySettingsController:
 
 @dataclass
 class AppSettings:
-    settings_schema_version: int = 10
+    settings_schema_version: int = 11
     # Audio mix
     original_audio_db: float = 0.0
     commentary_audio_db: float = 0.0
@@ -152,6 +153,7 @@ class AppSettings:
     voice_language: str = "en-US"
     voice_style: str = ""
     voice_model: str = "omnivoice"
+    commentary_reading_speed: float = 1.0
 
     # AI Gateway (Dual-Stage: Sub for video analysis, Prime for synthesis)
     gateway_endpoint: str = "http://127.0.0.1:20128"
@@ -221,6 +223,10 @@ class AppSettings:
     def __post_init__(self) -> None:
         if self.canvas_auto is None:
             self.canvas_auto = True
+        speed=float(self.commentary_reading_speed)
+        if not any(abs(speed-value)<1e-9 for value in COMMENTARY_SPEED_VALUES):
+            raise ValueError("commentary_reading_speed must be a supported value from 0.80x to 1.30x")
+        self.commentary_reading_speed=round(speed,2)
         if self.gateway_sub_model and (not self.gateway_model or self.gateway_model == "sub"):
             self.gateway_model = self.gateway_sub_model
         elif self.gateway_model and not self.gateway_sub_model:

@@ -65,6 +65,7 @@ from toolrecap_v4.subtitles import (
 from toolrecap_v4.validator import validate_windows_name
 from toolrecap_v4.voice_studio import VoiceStudioAdapter, validate_wav_bytes
 from toolrecap_v4.progress import ActivityState, WorkflowStage, safe_emit
+from toolrecap_v4.narration_fit import resolve_narration_fit
 
 
 class RenderError(ToolRecapError):
@@ -369,6 +370,7 @@ def render_output(
 
     try:
         segment_mkv_paths: list[Path] = []
+        effective_segment_durations: dict[str, int] = {}
         normal_orig_linear, ducked_orig_linear, comm_linear = calculate_ducking_gains(
             cfg.original_audio_db,
             cfg.commentary_audio_db,
@@ -410,7 +412,8 @@ def render_output(
                     f"Segment '{seg_id}' end_ms ({end_ms}) <= start_ms ({start_ms})."
                 )
 
-            seg_dur_ms = end_ms - start_ms
+            planned_seg_dur_ms = end_ms - start_ms
+            seg_dur_ms = planned_seg_dur_ms
             seg_dur_s = seg_dur_ms / 1000.0
             seg_start_s = start_ms / 1000.0
 
@@ -448,6 +451,8 @@ def render_output(
                         style=cfg.voice_style,
                         cancellation_token=cancellation_token,
                     )
+                    from toolrecap_v4.downstream import apply_commentary_speed
+                    wav_bytes = apply_commentary_speed(wav_bytes, cfg.commentary_reading_speed, ffmpeg_path=ffmpeg)
                     narr_dur_s = validate_wav_bytes(wav_bytes)
                     narr_wav = narration_dir / f"narr_{seg_idx:04d}.wav"
                     narr_wav.write_bytes(wav_bytes)
@@ -456,14 +461,14 @@ def render_output(
                         f"Segment '{seg_id}' specifies narration text, but no voice adapter or narration audio was provided."
                     )
 
-                # Narration Fit Policy Check (INVARIANT: Fail oversize, never trim clips)
                 narr_dur_ms = int(round(narr_dur_s * 1000.0))
-                if narr_dur_ms > seg_dur_ms:
-                    raise NarrationFitError(
-                        f"Narration fit policy violation in segment '{seg_id}': narration audio duration "
-                        f"({narr_dur_ms}ms) exceeds visual segment duration ({seg_dur_ms}ms). "
-                        f"Trimming or altering editorial clips is strictly prohibited."
-                    )
+                fit=resolve_narration_fit(segment_id=seg_id,start_ms=start_ms,end_ms=end_ms,source_duration_ms=src_dur_ms,narration_duration_ms=narr_dur_ms)
+                end_ms=fit.source_end_ms;seg_dur_ms=fit.render_duration_ms;seg_dur_s=seg_dur_ms/1000.0
+                effective_segment_durations[seg_id] = seg_dur_ms
+                source_visual_s=(fit.source_end_ms-fit.start_ms)/1000.0;hold_s=fit.hold_ms/1000.0
+                emit(WorkflowStage.NARRATION_FIT,state=ActivityState.LOCAL_PROCESSING.value,activity_text=f"Narration {narr_dur_s:.1f}s; visual {planned_seg_dur_ms/1000.0:.1f}s; strategy: {', '.join(fit.strategy)}",current_item=seg_id,completed=seg_idx+1,total=len(segments),unit="segments",stage_status="complete" if seg_idx+1==len(segments) else None)
+            else:
+                source_visual_s=seg_dur_s;hold_s=0.0
 
             # Build FFmpeg command for normalized intermediate segment MKV
             seg_mkv = segments_dir / f"seg_{seg_idx:04d}.mkv"
@@ -472,7 +477,7 @@ def render_output(
                 "-y",
                 "-accurate_seek",
                 "-ss", f"{seg_start_s:.6f}",
-                "-t", f"{seg_dur_s:.6f}",
+                "-t", f"{source_visual_s:.6f}",
                 "-i", str(src_path),
             ]
 
@@ -498,11 +503,12 @@ def render_output(
 
             # Video filter: aspect-fit into canvas, pad borders, set FPS and yuv420p
             # Normalize anamorphic pixels to square pixels via ih*dar before aspect-fit scale
+            hold_filter=f",tpad=stop_mode=clone:stop_duration={hold_s:.6f}" if hold_s>0 else ""
             v_filter = (
                 f"[0:v]scale=ih*dar:ih,scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
                 f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,"
                 f"fps={canvas_fps},format=yuv420p,"
-                f"trim=0:{seg_dur_s:.6f},setpts=PTS-STARTPTS[vout]"
+                f"trim=0:{source_visual_s:.6f},setpts=PTS-STARTPTS{hold_filter}[vout]"
             )
 
             filter_chains = [v_filter]
@@ -597,7 +603,12 @@ def render_output(
         )
 
         # Subtitle generation into temp_dir
-        temp_narr_srt, temp_orig_srt = generate_subtitles(output_def, temp_dir, title=title)
+        subtitle_output = copy.deepcopy(output_def)
+        for subtitle_segment in subtitle_output.get("segments", []):
+            duration = effective_segment_durations.get(subtitle_segment.get("segment_id"))
+            if duration is not None:
+                subtitle_segment["end_ms"] = int(subtitle_segment.get("start_ms", 0)) + duration
+        temp_narr_srt, temp_orig_srt = generate_subtitles(subtitle_output, temp_dir, title=title)
 
         # Two-pass Loudnorm: Pass 1 (measurement)
         measured_params = measure_loudnorm(

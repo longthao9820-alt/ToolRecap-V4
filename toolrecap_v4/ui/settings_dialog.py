@@ -30,7 +30,8 @@ from toolrecap_v4.__version__ import __version__
 from toolrecap_v4.gateway import GatewayClient, sanitize_message
 from toolrecap_v4.persistence import ProjectPersistence
 from toolrecap_v4.secrets import DPAPISecretStore
-from toolrecap_v4.settings import AppSettings, GatewayFormValues, GatewaySettingsController, REASONING_VALUES, SettingsManager
+from toolrecap_v4.settings import AppSettings, COMMENTARY_SPEED_VALUES, GatewayFormValues, GatewaySettingsController, REASONING_VALUES, SettingsManager
+from toolrecap_v4.downstream import apply_commentary_speed
 from toolrecap_v4.ui.notifications import WindowsNotificationService
 from toolrecap_v4.updater import UpdateCheckResult, UpdateManager
 from toolrecap_v4.voice_studio import (
@@ -302,6 +303,7 @@ class SettingsDialog(tk.Toplevel):
         self.var_voice_id = tk.StringVar(value=get_voice_display_name(raw_voice) if raw_voice else "")
         self.var_voice_lang = tk.StringVar(value=val.voice_language)
         self.var_voice_style = tk.StringVar(value=val.voice_style)
+        self.var_commentary_speed = tk.StringVar(value=f"{val.commentary_reading_speed:.2f}x")
         self.voice_status_var = tk.StringVar(value="")
 
         # Audio Mix variables
@@ -887,6 +889,12 @@ class SettingsDialog(tk.Toplevel):
         ttk.Entry(p, textvariable=self.var_voice_style).grid(row=row, column=1, columnspan=2, sticky="ew", padx=(10, 0), pady=4)
         row += 1
 
+        ttk.Label(p, text="Commentary Reading Speed:").grid(row=row, column=0, sticky="w", pady=4)
+        self.cmb_commentary_speed = ttk.Combobox(p, textvariable=self.var_commentary_speed, values=[f"{value:.2f}x" for value in COMMENTARY_SPEED_VALUES], state="readonly", width=10)
+        self.cmb_commentary_speed.grid(row=row, column=1, sticky="w", padx=(10, 0), pady=4)
+        ttk.Label(p, text="Fixed narration speed; ToolRecap adjusts video timing to match.", foreground="#64748B").grid(row=row, column=2, sticky="w", padx=6)
+        row += 1
+
         # Action bar: Test, Preview, Progress, Status
         f_actions = ttk.Frame(p)
         f_actions.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(12, 4))
@@ -1109,6 +1117,8 @@ class SettingsDialog(tk.Toplevel):
                     language=lang,
                     style=style,
                 )
+                speed=float(self.var_commentary_speed.get().rstrip("x"))
+                wav_bytes=apply_commentary_speed(wav_bytes,speed)
                 tmp_wav.write_bytes(wav_bytes)
                 self._post_ui(lambda: self.voice_preview_prog.configure(value=100))
 
@@ -1531,6 +1541,9 @@ class SettingsDialog(tk.Toplevel):
             self.settings.voice_id = resolve_voice_id(raw_voice_choice)
             self.settings.voice_language = self.var_voice_lang.get().strip()
             self.settings.voice_style = self.var_voice_style.get().strip()
+            speed=float(self.var_commentary_speed.get().rstrip("x"))
+            if not any(abs(speed-value)<1e-9 for value in COMMENTARY_SPEED_VALUES):raise ValueError("Commentary Reading Speed không được hỗ trợ.")
+            self.settings.commentary_reading_speed=round(speed,2)
 
             self.settings.original_audio_db = orig_db
             self.settings.commentary_audio_db = comm_db

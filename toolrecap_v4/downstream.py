@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import uuid
+import tempfile
 from typing import Any, Callable
 
 from toolrecap_v4.cancellation import CancellationToken
@@ -14,9 +15,21 @@ from toolrecap_v4.errors import VoiceStudioUnavailableError
 from toolrecap_v4.persistence import atomic_write_json
 from toolrecap_v4.settings import AppSettings
 from toolrecap_v4.voice_studio import VoiceStudioAdapter, validate_wav_bytes
+from toolrecap_v4.media import find_binary,run_command
 from toolrecap_v4.progress import ActivityState, WorkflowStage, safe_emit
 
 VOICE_CACHE_VERSION = "downstream-voice-v1"
+
+def apply_commentary_speed(wav_bytes:bytes,speed:float,*,ffmpeg_path:Path|str|None=None)->bytes:
+    """Apply only the user-selected global speed using pitch-preserving atempo."""
+    speed=round(float(speed),2)
+    if speed==1.0:return wav_bytes
+    if not 0.80<=speed<=1.30:raise ValueError("Unsupported commentary reading speed")
+    ffmpeg=find_binary("ffmpeg",ffmpeg_path)
+    with tempfile.TemporaryDirectory(prefix="toolrecap_voice_speed_") as temporary:
+        source=Path(temporary)/"input.wav";target=Path(temporary)/"output.wav";source.write_bytes(wav_bytes)
+        run_command([str(ffmpeg),"-y","-i",str(source),"-filter:a",f"atempo={speed:.2f}",str(target)],timeout=60.0,check=True)
+        data=target.read_bytes();validate_wav_bytes(data);return data
 
 
 def _canonical(value: Any) -> bytes:
@@ -67,7 +80,7 @@ class DownstreamVoiceCache:
         total = len(narration_segments)
         self._emit(
             state=ActivityState.RUNNING.value,
-            activity_text=f"Preparing {total} narration segments for {output_def.get('render_id')}...",
+            activity_text=f"Preparing {total} narration segments at {settings.commentary_reading_speed:.2f}x for {output_def.get('render_id')}...",
             output_id=output_def.get("render_id"), completed=0, total=total, unit="segments",
         )
         for segment in narration_segments:
@@ -92,6 +105,7 @@ class DownstreamVoiceCache:
                 "voice_model": settings.voice_model,
                 "voice_language": settings.voice_language,
                 "voice_style": settings.voice_style,
+                "commentary_reading_speed": round(float(settings.commentary_reading_speed),2),
             }
             key = _digest(dependencies)
             directory = self.base / output_def["render_id"] / segment_id / key[:24]
@@ -129,6 +143,7 @@ class DownstreamVoiceCache:
                 style=settings.voice_style,
                 cancellation_token=cancellation_token,
             )
+            wav_bytes=apply_commentary_speed(wav_bytes,settings.commentary_reading_speed)
             duration = validate_wav_bytes(wav_bytes)
             digest = hashlib.sha256(wav_bytes).hexdigest()
             directory.mkdir(parents=True, exist_ok=True)
@@ -147,6 +162,7 @@ class DownstreamVoiceCache:
                     "wav_hash": digest,
                     "wav_size": len(wav_bytes),
                     "duration_seconds": duration,
+                    "commentary_reading_speed": round(float(settings.commentary_reading_speed),2),
                 })
             finally:
                 tmp.unlink(missing_ok=True)

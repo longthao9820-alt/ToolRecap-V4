@@ -53,6 +53,7 @@ class WorkflowStage(str, enum.Enum):
     WRITERS = "writers"
     FINAL_JSON = "final_json"
     VOICE = "voice"
+    NARRATION_FIT = "narration_fit"
     AUDIO_MIX = "audio_mix"
     RENDER = "render"
     PUBLISH = "publish"
@@ -69,6 +70,7 @@ STAGE_LABELS: dict[str, str] = {
     WorkflowStage.WRITERS.value: "Writing Recap Outputs",
     WorkflowStage.FINAL_JSON.value: "Building Final JSON",
     WorkflowStage.VOICE.value: "Generating Voice",
+    WorkflowStage.NARRATION_FIT.value: "Fitting Video to Narration",
     WorkflowStage.AUDIO_MIX.value: "Mixing Audio",
     WorkflowStage.RENDER.value: "Rendering Video",
     WorkflowStage.PUBLISH.value: "Publishing Output",

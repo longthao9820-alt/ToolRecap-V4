@@ -253,6 +253,7 @@ def compute_output_fingerprint(
         "voice_language": settings.voice_language,
         "voice_style": settings.voice_style,
         "voice_model": settings.voice_model,
+        "commentary_reading_speed": settings.commentary_reading_speed,
         "voice_mode": settings.voice_mode,
         "voice_local_url": settings.voice_local_url,
         "voice_remote_url": settings.voice_remote_url,

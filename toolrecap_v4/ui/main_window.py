@@ -1270,7 +1270,7 @@ class MainWindow(tk.Tk):
             "preparation": "Preparation", "scanner": "Scanner", "catalog": "Catalog",
             "planner": "Planner", "evidence": "Evidence", "vision": "Vision",
             "final_plan": "Final Plan", "writers": "Writers", "final_json": "Final JSON",
-            "voice": "Voice", "audio_mix": "Audio", "render": "Render", "publish": "Publish",
+            "voice": "Voice", "narration_fit": "Narration Fit", "audio_mix": "Audio", "render": "Render", "publish": "Publish",
         }
         symbols = {"complete": "✓", "active": "●", "pending": "○", "retry": "↻", "skipped": "—", "failed": "!"}
         pipeline = snapshot.get("pipeline") if isinstance(snapshot.get("pipeline"), dict) else {}
