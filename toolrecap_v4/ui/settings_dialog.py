@@ -138,6 +138,7 @@ class SettingsDialog(tk.Toplevel):
         on_save: Optional[Callable[[AppSettings], None]] = None,
         settings: Optional[AppSettings] = None,
         store: Any = None,
+        on_closed: Optional[Callable[["SettingsDialog"], None]] = None,
     ) -> None:
         super().__init__(parent)
         self.parent = parent
@@ -146,6 +147,10 @@ class SettingsDialog(tk.Toplevel):
         self.secret_store = DPAPISecretStore(storage_root=self.persistence.root)
         self.gateway_controller = GatewaySettingsController(self.settings_manager, self.secret_store)
         self.on_saved = on_saved or on_save
+        self.on_closed = on_closed
+        self._closed = False
+        self._ui_queue: queue.Queue[Callable[[], None]] = queue.Queue()
+        self._ui_poll_job: Optional[str] = None
         self.settings = settings or self.settings_manager.load()
 
         self._panes: Dict[str, ttk.Frame] = {}
@@ -168,8 +173,79 @@ class SettingsDialog(tk.Toplevel):
         else:
             self._show_pane("Recap")
 
+        self._recover_geometry()
+        self._begin_modal()
+        self.bind("<Escape>", lambda e: self._on_close())
+        self._ui_poll_job = self.after(25, self._poll_ui_queue)
+
+    def _begin_modal(self) -> None:
+        """Establish a controlled grab only after the owned window is visible."""
+        self.deiconify()
+        self._recover_geometry()
+        self.lift()
+        self.focus_set()
         self.grab_set()
-        self.bind("<Escape>", lambda e: self.destroy())
+
+    def activate(self) -> bool:
+        """Restore and foreground this owned dialog after explicit app activation."""
+        if self._closed or not self.winfo_exists():
+            return False
+        try:
+            if self.state() in ("withdrawn", "iconic"):
+                self.deiconify()
+            self._recover_geometry()
+            self.lift()
+            self.focus_set()
+            if str(self) not in str(self.grab_current()):
+                self.grab_set()
+            return True
+        except tk.TclError:
+            return False
+
+    def _recover_geometry(self) -> None:
+        """Keep the dialog on the current virtual desktop after monitor changes."""
+        try:
+            self.update_idletasks()
+            width = max(self.winfo_width(), 840)
+            height = max(self.winfo_height(), 600)
+            x = self.winfo_rootx()
+            y = self.winfo_rooty()
+            vx = self.winfo_vrootx()
+            vy = self.winfo_vrooty()
+            vw = self.winfo_vrootwidth()
+            vh = self.winfo_vrootheight()
+            visible = x + width > vx and x < vx + vw and y + height > vy and y < vy + vh
+            if not visible:
+                parent = self.parent
+                parent.update_idletasks()
+                px, py = parent.winfo_rootx(), parent.winfo_rooty()
+                pw, ph = max(parent.winfo_width(), 1), max(parent.winfo_height(), 1)
+                x = px + max(0, (pw - width) // 2)
+                y = py + max(0, (ph - height) // 2)
+                self.geometry(f"{width}x{height}+{x}+{y}")
+        except tk.TclError:
+            pass
+
+    def _post_ui(self, callback: Callable[[], None]) -> None:
+        """Marshal worker results to Tk's thread; synchronous tests remain deterministic."""
+        if threading.current_thread() is threading.main_thread():
+            callback()
+        else:
+            self._ui_queue.put(callback)
+
+    def _poll_ui_queue(self) -> None:
+        if self._closed:
+            return
+        try:
+            while True:
+                self._ui_queue.get_nowait()()
+        except queue.Empty:
+            pass
+        except tk.TclError:
+            return
+        finally:
+            if not self._closed and self.winfo_exists():
+                self._ui_poll_job = self.after(25, self._poll_ui_queue)
 
     # -------------------------------------------------------------------------
     # VARIABLES & STATE
@@ -955,13 +1031,13 @@ class SettingsDialog(tk.Toplevel):
                 adapter = self._get_voice_adapter()
                 health = adapter.check_health()
                 status_txt = health.get("status", "ok") if isinstance(health, dict) else "ok"
-                self.after(0, lambda: (
+                self._post_ui(lambda: (
                     self.voice_status_var.set(f"✓ Kết nối VoiceStudio thành công ({status_txt})"),
                     self.lbl_voice_status.config(foreground="#16A34A"),
                     self.voice_preview_prog.configure(value=100),
                 ))
             except Exception as e:
-                self.after(0, lambda err=str(e): (
+                self._post_ui(lambda err=str(e): (
                     self.voice_status_var.set(f"✗ Lỗi kết nối: {err[:80]}"),
                     self.lbl_voice_status.config(foreground="#DC2626"),
                     self.voice_preview_prog.configure(value=0),
@@ -987,18 +1063,18 @@ class SettingsDialog(tk.Toplevel):
                         voice_ids.append(v)
                 if voice_ids:
                     display_names = [get_voice_display_name(vid) for vid in voice_ids]
-                    self.after(0, lambda: (
+                    self._post_ui(lambda: (
                         self.cmb_voice_id.config(values=display_names),
                         self.voice_status_var.set(f"✓ Đã tải {len(display_names)} giọng đọc."),
                         self.lbl_voice_status.config(foreground="#16A34A"),
                     ))
                 else:
-                    self.after(0, lambda: (
+                    self._post_ui(lambda: (
                         self.voice_status_var.set("Không tìm thấy danh sách giọng."),
                         self.lbl_voice_status.config(foreground="#D97706"),
                     ))
             except Exception as e:
-                self.after(0, lambda err=str(e): (
+                self._post_ui(lambda err=str(e): (
                     self.voice_status_var.set(f"✗ Lỗi tải danh sách: {err[:80]}"),
                     self.lbl_voice_status.config(foreground="#DC2626"),
                 ))
@@ -1025,7 +1101,7 @@ class SettingsDialog(tk.Toplevel):
                 tmp_wav = self.persistence.root / "cache" / "preview_sample.wav"
                 tmp_wav.parent.mkdir(parents=True, exist_ok=True)
 
-                self.after(0, lambda: self.voice_preview_prog.configure(value=50))
+                self._post_ui(lambda: self.voice_preview_prog.configure(value=50))
                 wav_bytes = adapter.synthesize(
                     input_text=sample_text,
                     voice=voice,
@@ -1034,7 +1110,7 @@ class SettingsDialog(tk.Toplevel):
                     style=style,
                 )
                 tmp_wav.write_bytes(wav_bytes)
-                self.after(0, lambda: self.voice_preview_prog.configure(value=100))
+                self._post_ui(lambda: self.voice_preview_prog.configure(value=100))
 
                 try:
                     import winsound
@@ -1042,12 +1118,12 @@ class SettingsDialog(tk.Toplevel):
                 except Exception as audio_err:
                     logger.warning("Playback error: %s", audio_err)
 
-                self.after(0, lambda: (
+                self._post_ui(lambda: (
                     self.voice_status_var.set("✓ Đã tạo và phát âm thanh thử nghiệm!"),
                     self.lbl_voice_status.config(foreground="#16A34A"),
                 ))
             except Exception as e:
-                self.after(0, lambda err=str(e): (
+                self._post_ui(lambda err=str(e): (
                     self.voice_status_var.set(f"✗ Lỗi thử giọng: {err[:80]}"),
                     self.lbl_voice_status.config(foreground="#DC2626"),
                     self.voice_preview_prog.configure(value=0),
@@ -1289,9 +1365,29 @@ class SettingsDialog(tk.Toplevel):
 
         self.lbl_update_status.config(text="Đang kiểm tra bản cập nhật...", foreground="#2563EB")
         self.lbl_update_result.config(text="Đang kết nối tới GitHub...", foreground="#2563EB")
-        self.update_idletasks()
+        self.btn_check_update.config(state="disabled")
 
-        result = self.update_manager.check_for_updates(repo)
+        def _work() -> None:
+            try:
+                result = self.update_manager.check_for_updates(repo)
+                self._post_ui(lambda: self._finish_update_check(result))
+            except Exception as exc:
+                self._post_ui(lambda error=exc: self._finish_update_check_error(error))
+
+        threading.Thread(target=_work, daemon=True, name="SettingsUpdateCheck").start()
+
+    def _finish_update_check_error(self, error: Exception) -> None:
+        if self._closed:
+            return
+        self.btn_check_update.config(state="normal")
+        self.lbl_update_status.config(text="Lỗi kiểm tra cập nhật", foreground="#DC2626")
+        self.lbl_update_result.config(text=f"Lỗi: {error}", foreground="#DC2626")
+        messagebox.showerror("Lỗi cập nhật", str(error), parent=self)
+
+    def _finish_update_check(self, result: UpdateCheckResult) -> None:
+        if self._closed:
+            return
+        self.btn_check_update.config(state="normal")
         self._last_check_result = result
 
         if result.status == "not_configured":
@@ -1321,26 +1417,35 @@ class SettingsDialog(tk.Toplevel):
         self.btn_download_update.config(state="disabled")
         self.lbl_update_status.config(text="Đang tải bản cập nhật...", foreground="#2563EB")
         self.lbl_update_result.config(text="Đang tải và xác thực gói cập nhật...", foreground="#2563EB")
-        self.update_idletasks()
+        result = self._last_check_result
 
-        try:
-            def on_progress(fraction: float, msg: str) -> None:
-                self.lbl_update_result.config(text=f"{int(fraction * 100)}% - {msg}")
-                self.update_idletasks()
+        def _work() -> None:
+            try:
+                def on_progress(fraction: float, msg: str) -> None:
+                    self._post_ui(lambda: self.lbl_update_result.config(text=f"{int(fraction * 100)}% - {msg}"))
 
-            staged_path = self.update_manager.download_and_stage(
-                self._last_check_result,
-                progress_callback=on_progress,
-            )
-            self._staged_update_path = staged_path
-            self.lbl_update_status.config(text="Đã tải và xác thực hoàn tất", foreground="#16A34A")
-            self.lbl_update_result.config(text="Gói cập nhật đã sẵn sàng để cài đặt.", foreground="#16A34A")
-            self.btn_apply_update.config(state="normal")
-        except Exception as e:
-            self.lbl_update_status.config(text="Tải bản cập nhật thất bại", foreground="#DC2626")
-            self.lbl_update_result.config(text=f"Lỗi: {e}", foreground="#DC2626")
-            self.btn_download_update.config(state="normal")
-            messagebox.showerror("Lỗi tải bản cập nhật", str(e), parent=self)
+                staged_path = self.update_manager.download_and_stage(result, progress_callback=on_progress)
+                self._post_ui(lambda: self._finish_update_download(staged_path))
+            except Exception as exc:
+                self._post_ui(lambda error=exc: self._finish_update_download_error(error))
+
+        threading.Thread(target=_work, daemon=True, name="SettingsUpdateDownload").start()
+
+    def _finish_update_download(self, staged_path: Path) -> None:
+        if self._closed:
+            return
+        self._staged_update_path = staged_path
+        self.lbl_update_status.config(text="Đã tải và xác thực hoàn tất", foreground="#16A34A")
+        self.lbl_update_result.config(text="Gói cập nhật đã sẵn sàng để cài đặt.", foreground="#16A34A")
+        self.btn_apply_update.config(state="normal")
+
+    def _finish_update_download_error(self, error: Exception) -> None:
+        if self._closed:
+            return
+        self.lbl_update_status.config(text="Tải bản cập nhật thất bại", foreground="#DC2626")
+        self.lbl_update_result.config(text=f"Lỗi: {error}", foreground="#DC2626")
+        self.btn_download_update.config(state="normal")
+        messagebox.showerror("Lỗi tải bản cập nhật", str(error), parent=self)
 
     def _apply_update(self) -> None:
         if hasattr(self.parent, "worker") and getattr(self.parent.worker, "is_running", False):
@@ -1470,7 +1575,7 @@ class SettingsDialog(tk.Toplevel):
                 self.on_saved(self.settings)
 
             self.lbl_status.config(text="✓ Đã lưu cài đặt thành công!", foreground="#16A34A")
-            self.after(400, self.destroy)
+            self.after(400, self._on_close)
 
         except Exception as e:
             self.settings = original_settings
@@ -1482,3 +1587,31 @@ class SettingsDialog(tk.Toplevel):
 
     def _on_close(self) -> None:
         self.destroy()
+
+    def destroy(self) -> None:
+        """Exception-safe modal cleanup for Save, Cancel, X, Escape, and shutdown."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._ui_poll_job:
+            try:
+                self.after_cancel(self._ui_poll_job)
+            except Exception:
+                pass
+            self._ui_poll_job = None
+        try:
+            current_grab = self.grab_current()
+            if current_grab and str(self) in str(current_grab):
+                self.grab_release()
+        except Exception:
+            pass
+        try:
+            super().destroy()
+        finally:
+            callback = self.on_closed
+            self.on_closed = None
+            if callback:
+                try:
+                    callback(self)
+                except Exception:
+                    logger.exception("Settings dialog close callback failed")

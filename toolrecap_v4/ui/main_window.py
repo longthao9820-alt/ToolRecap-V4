@@ -293,6 +293,8 @@ class MainWindow(tk.Tk):
         self.geometry("1120x900")
         self.minsize(920, 760)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Map>", self._on_window_activated, add="+")
+        self.bind("<FocusIn>", self._on_window_activated, add="+")
 
         # Storage & State
         self.persistence = persistence or ProjectPersistence()
@@ -314,6 +316,8 @@ class MainWindow(tk.Tk):
         self._gpu_detect_job: Optional[str] = None
         self._close_job: Optional[str] = None
         self._activity_timer_job: Optional[str] = None
+        self.active_modal: Optional[tk.Toplevel] = None
+        self._shutting_down = False
 
         self.settings = self.settings_manager.load()
         self.discovered_sources: List[SourceFingerprint] = []
@@ -935,18 +939,60 @@ class MainWindow(tk.Tk):
         self._open_output_folder()
 
     def _on_open_settings(self, initial_tab: Optional[int | str] = None) -> None:
+        existing = self.active_modal
+        if existing is not None:
+            try:
+                if existing.winfo_exists() and hasattr(existing, "activate") and existing.activate():
+                    return
+            except tk.TclError:
+                pass
+            self.active_modal = None
+
         def _on_saved(new_settings: AppSettings) -> None:
             self.settings = new_settings
             self.banner.show("Đã lưu cài đặt thành công!", level="success")
             self._log("Cài đặt hệ thống đã được cập nhật.")
 
-        SettingsDialog(
+        def _on_closed(dialog: tk.Toplevel) -> None:
+            if self.active_modal is dialog:
+                self.active_modal = None
+            if not self._shutting_down and not self._is_closed:
+                try:
+                    self.deiconify()
+                    self.lift()
+                    self.focus_set()
+                except tk.TclError:
+                    pass
+
+        dialog = SettingsDialog(
             parent=self,
             settings_manager=self.settings_manager,
             persistence=self.persistence,
             on_saved=_on_saved,
             initial_tab=initial_tab,
+            on_closed=_on_closed,
         )
+        self.active_modal = dialog
+
+    def _on_window_activated(self, _event: Any = None) -> None:
+        """Recover the active owned modal only when Windows activates this app."""
+        if self._shutting_down or self._is_closed:
+            return
+        modal = self.active_modal
+        if modal is not None:
+            try:
+                if modal.winfo_exists() and hasattr(modal, "activate"):
+                    modal.activate()
+                    return
+            except tk.TclError:
+                pass
+            self.active_modal = None
+        try:
+            if self.state() in ("withdrawn", "iconic"):
+                self.deiconify()
+            self.lift()
+        except tk.TclError:
+            pass
 
     def _on_check_update(self) -> None:
         self._on_open_settings(initial_tab="update")
@@ -1496,6 +1542,8 @@ class MainWindow(tk.Tk):
         pass
 
     def _on_close(self) -> None:
+        if self._shutting_down:
+            return
         if self.worker.is_running:
             if not messagebox.askyesno(
                 "Đang xử lý",
@@ -1536,9 +1584,19 @@ class MainWindow(tk.Tk):
         """Safe window destruction with closed guard, after cancellation, and worker stopping."""
         if getattr(self, "_is_closed", False):
             return
+        self._shutting_down = True
         self._is_closed = True
 
         self.cancel_owned_after()
+
+        modal = self.active_modal
+        self.active_modal = None
+        if modal is not None:
+            try:
+                if modal.winfo_exists():
+                    modal.destroy()
+            except tk.TclError:
+                pass
 
         if hasattr(self, "discovery_worker") and self.discovery_worker.is_running:
             self.discovery_worker.cancel()

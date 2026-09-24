@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 import zipfile
 from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
@@ -454,6 +455,10 @@ def test_settings_dialog_update_tab_wiring(tmp_path: Path):
 
         with patch.object(dialog.update_manager, "check_for_updates", return_value=fake_result):
             dialog._check_update()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and dialog._last_check_result is not fake_result:
+                app.update()
+                time.sleep(0.01)
             assert "Có bản cập nhật mới v4.1.0" in dialog.lbl_update_status.cget("text")
             assert str(dialog.btn_download_update["state"]) == "normal"
 
@@ -462,6 +467,10 @@ def test_settings_dialog_update_tab_wiring(tmp_path: Path):
         fake_staged_path.mkdir()
         with patch.object(dialog.update_manager, "download_and_stage", return_value=fake_staged_path):
             dialog._download_update()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and dialog._staged_update_path != fake_staged_path:
+                app.update()
+                time.sleep(0.01)
             assert "Đã tải và xác thực hoàn tất" in dialog.lbl_update_status.cget("text")
             assert str(dialog.btn_apply_update["state"]) == "normal"
 
