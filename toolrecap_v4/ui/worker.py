@@ -329,6 +329,7 @@ class WorkflowWorker:
         cfg = settings or self.settings_manager.load()
 
         def _worker_target() -> None:
+            pre_tracker: WorkflowProgressTracker | None = None
             try:
                 pre_tracker = WorkflowProgressTracker(
                     self.persistence, project_id,
@@ -378,11 +379,15 @@ class WorkflowWorker:
                 self._put_message("log", f"Dự án '{project_name}' đã hoàn thành toàn bộ quy trình!")
 
             except CancelledError:
+                if pre_tracker is not None and pre_tracker.tick().get("active"):
+                    pre_tracker.terminate(ActivityState.CANCELLED, activity_text="Project cancelled during source preparation.")
                 self._put_message("log", "Tiến trình đã được dừng an toàn tại điểm checkpoint.")
                 self._put_message("status_change", ProjectStatus.CANCELLED.value)
                 self._put_message("finished", {"status": ProjectStatus.CANCELLED.value, "project_id": project_id})
             except Exception as e:
                 clean_err = format_clean_error(e)
+                if pre_tracker is not None and pre_tracker.tick().get("active"):
+                    pre_tracker.terminate(ActivityState.FAILED, activity_text="Source preparation failed.", error=clean_err)
                 self._put_message("log", f"Lỗi tiến trình: {clean_err}")
                 self._put_message("error", {"message": clean_err})
                 self._put_message("finished", {"status": ProjectStatus.FAILED.value, "project_id": project_id, "error": clean_err})
@@ -414,6 +419,7 @@ class WorkflowWorker:
         cfg = settings or self.settings_manager.load()
 
         def _target() -> None:
+            workflow = None
             try:
                 from toolrecap_v4.highlight import HighlightWorkflow
                 store = DPAPISecretStore(storage_root=self.persistence.root)
@@ -430,9 +436,13 @@ class WorkflowWorker:
                 final_state = workflow.run(project_id, settings=cfg, cancellation_token=token)
                 self._put_message("finished", {"status": ProjectStatus.COMPLETED.value, "project": final_state, "mode": "HIGHLIGHT"})
             except CancelledError:
+                if workflow is not None and workflow.tracker is not None and workflow.tracker.tick().get("active"):
+                    workflow.tracker.terminate(ActivityState.CANCELLED, activity_text="Highlight cancelled during source preparation.")
                 self._put_message("finished", {"status": ProjectStatus.CANCELLED.value, "project_id": project_id, "mode": "HIGHLIGHT"})
             except Exception as exc:
                 clean = format_clean_error(exc)
+                if workflow is not None and workflow.tracker is not None and workflow.tracker.tick().get("active"):
+                    workflow.tracker.terminate(ActivityState.FAILED, activity_text="Highlight source preparation failed.", error=clean)
                 self._put_message("error", {"message": clean})
                 self._put_message("finished", {"status": ProjectStatus.FAILED.value, "project_id": project_id, "error": clean, "mode": "HIGHLIGHT"})
             finally:
@@ -461,6 +471,7 @@ class WorkflowWorker:
         cfg = settings or self.settings_manager.load()
 
         def _worker_target() -> None:
+            pre_tracker: WorkflowProgressTracker | None = None
             try:
                 pre_tracker = WorkflowProgressTracker(
                     self.persistence, project_id,
@@ -501,11 +512,15 @@ class WorkflowWorker:
                 self._put_message("log", f"Dự án '{project_id}' đã hoàn tất thành công!")
 
             except CancelledError:
+                if pre_tracker is not None and pre_tracker.tick().get("active"):
+                    pre_tracker.terminate(ActivityState.CANCELLED, activity_text="Resume cancelled.")
                 self._put_message("log", "Tiến trình tiếp tục đã dừng an toàn.")
                 self._put_message("status_change", ProjectStatus.CANCELLED.value)
                 self._put_message("finished", {"status": ProjectStatus.CANCELLED.value, "project_id": project_id})
             except Exception as e:
                 clean_err = format_clean_error(e)
+                if pre_tracker is not None and pre_tracker.tick().get("active"):
+                    pre_tracker.terminate(ActivityState.FAILED, activity_text="Resume failed.", error=clean_err)
                 self._put_message("log", f"Lỗi khi tiếp tục dự án: {clean_err}")
                 self._put_message("error", {"message": clean_err})
                 self._put_message("finished", {"status": ProjectStatus.FAILED.value, "project_id": project_id, "error": clean_err})
