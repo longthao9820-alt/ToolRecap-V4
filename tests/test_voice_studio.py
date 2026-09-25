@@ -86,7 +86,7 @@ def test_auto_routing_local_first():
         return httpx.Response(500)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    adapter = VoiceStudioAdapter(mode="auto", client=client)
+    adapter = VoiceStudioAdapter(mode="auto", remote_url="https://voice.example.ts.net:8443", client=client)
 
     wav = adapter.synthesize("Test input")
     assert wav == valid_wav
@@ -111,7 +111,7 @@ def test_auto_routing_fallback_to_remote():
         return httpx.Response(404)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    adapter = VoiceStudioAdapter(mode="auto", client=client)
+    adapter = VoiceStudioAdapter(mode="auto", remote_url="https://voice.example.ts.net:8443", client=client)
 
     wav = adapter.synthesize("Test input")
     assert wav == valid_wav
@@ -144,7 +144,9 @@ def test_auth_separation_and_credential_sanitization():
         return httpx.Response(400, text=f"Error occurred with token {secret_key}")
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    adapter = VoiceStudioAdapter(mode="remote", remote_api_key=secret_key, client=client)
+    adapter = VoiceStudioAdapter(
+        mode="remote", remote_url="https://voice.example.test", remote_api_key=secret_key, client=client,
+    )
 
     with pytest.raises(VoiceStudioError) as exc_info:
         adapter.synthesize("Test input")
@@ -208,7 +210,7 @@ def test_actual_v2_preset_payload_all_12_and_piper_reject():
     import json
     from toolrecap_v4.voice_studio import V2_VOICE_PRESETS
 
-    # Exact archetype instructions from V2 catalog (C:/Users/Long/Desktop/ToolRecap_V2/toolrecap_v2/voice/catalog.py)
+    # Exact archetype instructions retained from the audited V2 voice catalog.
     # and omnivoice_adapter.py (OFFICIAL_VOICE_INSTRUCTS)
     v2_catalog_exact_instructs = {
         "voicestudio.en.neighbor": "female, young adult, moderate pitch, american accent",

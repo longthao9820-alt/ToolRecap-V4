@@ -162,5 +162,5 @@ def test_generate_subtitles_creates_both_files(tmp_path: Path):
 
 def test_escape_ffmpeg_subtitles_path():
     """Verify path escaping for FFmpeg subtitles filter on Windows."""
-    escaped = escape_ffmpeg_subtitles_path(r"C:\Users\Long\sub.srt")
-    assert r"C\:/Users/Long/sub.srt" in escaped
+    escaped = escape_ffmpeg_subtitles_path(r"C:\Users\Example\sub.srt")
+    assert r"C\:/Users/Example/sub.srt" in escaped

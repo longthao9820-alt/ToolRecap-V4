@@ -16,7 +16,7 @@ def test_settings_defaults():
       target -14.0 LUFS, peak -1.0 dBTP
     - GPU: True (GPU on)
     - Voice: alloy, language en-US, style configurable ("")
-    - VoiceStudio: mode auto, local http://127.0.0.1:3900, remote https://desktop-t5c9b90.tail7b66e0.ts.net:8443
+    - VoiceStudio: mode auto with configurable local/remote endpoints.
     - Gateway: endpoint http://127.0.0.1:20128, provider-neutral model IDs empty
     - Notifications: all ON
     """

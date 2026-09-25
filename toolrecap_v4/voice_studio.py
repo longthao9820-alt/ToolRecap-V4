@@ -237,7 +237,7 @@ class VoiceStudioAdapter:
         self,
         mode: str = "auto",
         local_url: str = "http://127.0.0.1:3900",
-        remote_url: str = "https://desktop-t5c9b90.tail7b66e0.ts.net:8443",
+        remote_url: str = "",
         remote_api_key: Optional[str] = None,
         timeout: float = 60.0,
         max_retries: int = 3,

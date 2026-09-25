@@ -5,7 +5,7 @@ Defaults match the specified requirements:
   target loudness -14.0 LUFS, true peak -1.0 dBTP.
 - GPU: True (GPU on).
 - Voice: alloy, language en-US, style configurable.
-- VoiceStudio: mode auto, local http://127.0.0.1:3900, remote https://desktop-t5c9b90.tail7b66e0.ts.net:8443.
+- VoiceStudio: mode auto, configurable local/remote endpoints.
 - AI Gateway: endpoint http://127.0.0.1:20128; provider-neutral model IDs default empty.
 - Notifications: all defaults ON.
 - Secrets: strictly separated; never stored in settings JSON.
