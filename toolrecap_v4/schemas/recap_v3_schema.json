@@ -121,6 +121,10 @@
         "source_audio": {
           "type": "boolean"
         },
+        "audio_intent": {
+          "type": "string",
+          "enum": ["ORIGINAL_AUDIO", "NARRATION_WITH_ORIGINAL_AUDIO", "SILENT_SOURCE"]
+        },
         "narration_duration_ms": {
           "type": "integer",
           "minimum": 0

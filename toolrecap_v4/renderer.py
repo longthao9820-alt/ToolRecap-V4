@@ -443,7 +443,11 @@ def render_output(
             narration_text = seg.get("narration")
             if narration_text is None:
                 narration_text = ""
-            source_audio_enabled = bool(seg.get("source_audio", True))
+            # Legacy generated Final JSON used source_audio=false for every
+            # narration segment.  Absence of an explicit audio_intent therefore
+            # migrates to the product-wide SOURCE FOOTAGE -> SOURCE AUDIO rule.
+            audio_intent = str(seg.get("audio_intent") or "NARRATION_WITH_ORIGINAL_AUDIO")
+            source_audio_enabled = audio_intent != "SILENT_SOURCE"
 
             # Narration synthesis / retrieval
             narr_wav: Optional[Path] = None

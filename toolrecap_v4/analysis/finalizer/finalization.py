@@ -114,7 +114,7 @@ def map_final_json(*,project_id:str,project_name:str,episodes:Sequence[PreparedE
         for s in r.normalized["segments"]:
             for clip_index,c in enumerate(s["source_clips"],1):
                 ep=next(e for e in episodes if e.episode_id==c["episode_id"])
-                segments.append({"segment_id":s["segment_id"] if len(s["source_clips"])==1 else f"{s['segment_id']}-{clip_index:02d}","source_file":ep.source_basename or ep.source_path.name,"start_ms":c["start_ms"],"end_ms":c["end_ms"],"type":"narration","narration":s["narration_text"],"source_audio":True,"subtitles":[]})
+                segments.append({"segment_id":s["segment_id"] if len(s["source_clips"])==1 else f"{s['segment_id']}-{clip_index:02d}","source_file":ep.source_basename or ep.source_path.name,"start_ms":c["start_ms"],"end_ms":c["end_ms"],"type":"narration","narration":s["narration_text"],"source_audio":True,"audio_intent":"NARRATION_WITH_ORIGINAL_AUDIO","subtitles":[]})
         outputs.append({"render_id":out["output_id"],"title":r.normalized["title"],"segments":segments})
     return {"schema_version":"3.0","project_id":project_id,"project_name":project_name,"sources":[{"source_file":e.source_basename or e.source_path.name,"duration_ms":e.duration_ms} for e in episodes],"outputs":outputs}
 

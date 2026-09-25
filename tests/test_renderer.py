@@ -95,6 +95,27 @@ def test_global_source_audio_and_original_dialogue_across_beginning_middle_end(t
     assert result.original_subtitle_cue_count == 3
 
 
+def test_legacy_false_source_audio_migrates_to_global_audio_rule_and_explicit_mute_wins(tmp_path: Path, synthetic_sources):
+    source_name = "clip_720p_24fps.mp4"
+    base = {"source_file": source_name, "start_ms": 0, "end_ms": 700,
+            "type": "original_dialogue", "narration": "", "source_audio": False, "subtitles": []}
+    legacy = {"render_id": "legacy", "title": "Legacy_Audio", "segments": [{"segment_id": "legacy", **base}]}
+    muted = {"render_id": "muted", "title": "Explicit_Mute", "segments": [
+        {"segment_id": "muted", **base, "audio_intent": "SILENT_SOURCE"}
+    ]}
+    dialogue = {source_name: (SubtitleCue(100, 300, "actor line"),)}
+    legacy_result = render_output(
+        legacy, synthetic_sources, tmp_path / "legacy", settings=AppSettings(use_gpu=False),
+        source_dialogue_map=dialogue,
+    )
+    muted_result = render_output(
+        muted, synthetic_sources, tmp_path / "muted", settings=AppSettings(use_gpu=False),
+        source_dialogue_map=dialogue,
+    )
+    assert parse_srt(legacy_result.original_srt_path.read_text(encoding="utf-8"))[0].text == "actor line"
+    assert muted_result.original_subtitle_state == "NO_ORIGINAL_DIALOGUE"
+
+
 def test_publication_staging_cleanup_on_copy_failure(tmp_path: Path, monkeypatch) -> None:
     """A failed publication preflight leaves neither user outputs nor neighbor temp files."""
     first = tmp_path / "first.source"
