@@ -52,7 +52,47 @@ from toolrecap_v4.renderer import (
 )
 from toolrecap_v4.settings import AppSettings
 from toolrecap_v4.subtitles import parse_srt
+from toolrecap_v4.subtitles import SubtitleCue
 from toolrecap_v4.voice_studio import VoiceStudioAdapter
+
+
+def test_global_source_audio_and_original_dialogue_across_beginning_middle_end(tmp_path: Path, synthetic_sources):
+    source_name = "clip_720p_24fps.mp4"
+    output = {
+        "render_id": "out_global_audio", "title": "Global_Audio", "segments": [
+            {"segment_id": "opening", "source_file": source_name, "start_ms": 0, "end_ms": 900,
+             "type": "narration", "narration": "Opening commentary.", "source_audio": True, "subtitles": []},
+            {"segment_id": "middle", "source_file": source_name, "start_ms": 1000, "end_ms": 1900,
+             "type": "narration", "narration": "Middle commentary.", "source_audio": True, "subtitles": []},
+            {"segment_id": "ending", "source_file": source_name, "start_ms": 2000, "end_ms": 2900,
+             "type": "narration", "narration": "Ending commentary.", "source_audio": True, "subtitles": []},
+        ],
+    }
+    voice = MagicMock(spec=VoiceStudioAdapter)
+    voice.synthesize.side_effect = lambda _text, **_kwargs: _create_wav_bytes(0.5)
+    result = render_output(
+        output, synthetic_sources, tmp_path / "published-global",
+        settings=AppSettings(use_gpu=False, canvas_width=640, canvas_height=360),
+        voice_adapter=voice,
+        source_dialogue_map={source_name: (
+            SubtitleCue(100, 300, "opening actor dialogue"),
+            SubtitleCue(1100, 1300, "middle actor dialogue"),
+            SubtitleCue(2100, 2300, "ending actor dialogue"),
+        )},
+    )
+    original = parse_srt(result.original_srt_path.read_text(encoding="utf-8"))
+    narration = parse_srt(result.narration_srt_path.read_text(encoding="utf-8"))
+    assert [cue.text for cue in original] == [
+        "opening actor dialogue", "middle actor dialogue", "ending actor dialogue",
+    ]
+    assert [(cue.start_ms, cue.end_ms) for cue in original] == [(100, 300), (600, 800), (1100, 1300)]
+    assert [cue.text for cue in narration] == ["Opening commentary.", "Middle commentary.", "Ending commentary."]
+    synthesized = [call.args[0] for call in voice.synthesize.call_args_list]
+    assert synthesized == ["Opening commentary.", "Middle commentary.", "Ending commentary."]
+    assert all("actor dialogue" not in text for text in synthesized)
+    assert probe_media(result.output_path).has_audio
+    assert result.original_subtitle_state == "ORIGINAL_DIALOGUE_MAPPED"
+    assert result.original_subtitle_cue_count == 3
 
 
 def test_publication_staging_cleanup_on_copy_failure(tmp_path: Path, monkeypatch) -> None:

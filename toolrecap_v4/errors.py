@@ -405,6 +405,10 @@ class VoiceStudioUnavailableError(VoiceStudioError):
     """Raised when VoiceStudio (local and/or remote) is unavailable."""
 
 
+class SourceDialogueNarrationError(VoiceStudioError):
+    """Raised before TTS when source character dialogue is routed as narration."""
+
+
 class InvalidAudioError(VoiceStudioError):
     """Raised when synthesized audio fails WAV verification or duration check."""
 

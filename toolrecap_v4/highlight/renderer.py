@@ -13,6 +13,7 @@ from toolrecap_v4.cancellation import CancellationToken
 from toolrecap_v4.media import CommandResult, find_binary, run_command
 from .models import HighlightOutput
 from .subtitles import highlight_srt
+from toolrecap_v4.original_dialogue import ORIGINAL_DIALOGUE_MAPPED, NO_ORIGINAL_DIALOGUE
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,8 @@ class HighlightRenderResult:
     subtitle_path: Path
     video_sha256: str
     subtitle_sha256: str
+    original_subtitle_state: str = NO_ORIGINAL_DIALOGUE
+    original_subtitle_cue_count: int = 0
 
 
 def _sha(path: Path) -> str:
@@ -81,4 +84,8 @@ def render_highlight(
             cancellation_token.check_cancelled()
         os.replace(staged_video, video)
         os.replace(staged_srt, subtitle)
-    return HighlightRenderResult(output.output_id, video, subtitle, _sha(video), _sha(subtitle))
+    cue_count = len(output.subtitle_cues)
+    return HighlightRenderResult(
+        output.output_id, video, subtitle, _sha(video), _sha(subtitle),
+        ORIGINAL_DIALOGUE_MAPPED if cue_count else NO_ORIGINAL_DIALOGUE, cue_count,
+    )

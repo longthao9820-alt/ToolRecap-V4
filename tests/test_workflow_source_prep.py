@@ -504,6 +504,8 @@ def test_imported_final_json_zero_prep_and_zero_gateway(workflow_env: dict[str, 
                 width=640,
                 height=480,
                 fps=25.0,
+                original_subtitle_state="NO_ORIGINAL_DIALOGUE",
+                original_subtitle_cue_count=0,
             ),
         )
         mp.setattr("toolrecap_v4.workflow.compute_file_sha256", lambda p: "fake_hash")

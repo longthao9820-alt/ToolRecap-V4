@@ -79,6 +79,7 @@ from toolrecap_v4.progress import (
     WorkflowProgressTracker,
     WorkflowStage,
 )
+from toolrecap_v4.original_dialogue import source_dialogue_map_from_episodes
 
 
 class ProjectStatus(str, enum.Enum):
@@ -209,6 +210,7 @@ def compute_output_fingerprint(
     output_def: Dict[str, Any],
     source_fingerprints: Dict[str, Any],
     settings: AppSettings,
+    source_dialogue_digest: str = "",
 ) -> str:
     """Compute deterministic SHA-256 fingerprint for an output, its sources, and render settings."""
     out_copy = {
@@ -234,6 +236,7 @@ def compute_output_fingerprint(
                 }
 
     render_settings = {
+        "original_dialogue_mapper_version": "original-dialogue-mapper-v1",
         "original_audio_db": settings.original_audio_db,
         "commentary_audio_db": settings.commentary_audio_db,
         "auto_duck": settings.auto_duck,
@@ -263,6 +266,7 @@ def compute_output_fingerprint(
         "output": out_copy,
         "sources": used_sources,
         "settings": render_settings,
+        "source_dialogue_digest": source_dialogue_digest,
     }
 
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
@@ -1188,6 +1192,16 @@ class ProjectWorkflow:
                 fp["basename"]: fp["path"]
                 for fp in state["source_fingerprints"].values()
             }
+            prepared_for_dialogue = [
+                PreparedEpisode.from_dict(item)
+                for item in self.persistence.list_prepared_episodes(project_id)
+            ]
+            source_dialogue_map = source_dialogue_map_from_episodes(prepared_for_dialogue)
+            source_dialogue_input = source_dialogue_map if prepared_for_dialogue else None
+            source_dialogue_digest = hashlib.sha256(json.dumps(
+                {source: [cue.to_dict() for cue in cues] for source, cues in source_dialogue_map.items()},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
 
             outputs_def = final_json.get("outputs", [])
             outputs_state = state.setdefault("outputs", {})
@@ -1208,7 +1222,9 @@ class ProjectWorkflow:
                 title = out_def["title"]
 
                 # Compute current render fingerprint
-                cur_fp = compute_output_fingerprint(out_def, state["source_fingerprints"], cfg)
+                cur_fp = compute_output_fingerprint(
+                    out_def, state["source_fingerprints"], cfg, source_dialogue_digest,
+                )
 
                 # Check existing checkpoint
                 ckpt = None
@@ -1243,7 +1259,20 @@ class ProjectWorkflow:
                     if ckpt_fp == cur_fp and out_path_str and expected_hash:
                         out_path = Path(out_path_str)
                         expected_path = (resolved_output_dir / f"{title}.mp4").resolve()
-                        if out_path.resolve() == expected_path and out_path.is_file():
+                        narration_srt = Path(ckpt.get("narration_srt_path", ""))
+                        original_srt = Path(ckpt.get("original_srt_path", ""))
+                        subtitle_state = ckpt.get("original_subtitle_state")
+                        subtitle_hashes_valid = (
+                            narration_srt.is_file() and original_srt.is_file()
+                            and ckpt.get("narration_srt_hash") == compute_file_sha256(narration_srt)
+                            and ckpt.get("original_srt_hash") == compute_file_sha256(original_srt)
+                            and subtitle_state in {"ORIGINAL_DIALOGUE_MAPPED", "NO_ORIGINAL_DIALOGUE"}
+                            and (
+                                subtitle_state != "ORIGINAL_DIALOGUE_MAPPED"
+                                or (int(ckpt.get("original_subtitle_cue_count", 0)) > 0 and original_srt.stat().st_size > 0)
+                            )
+                        )
+                        if out_path.resolve() == expected_path and out_path.is_file() and subtitle_hashes_valid:
                             actual_hash = compute_file_sha256(out_path)
                             if actual_hash == expected_hash:
                                 should_skip = True
@@ -1296,6 +1325,7 @@ class ProjectWorkflow:
                         final_json_hash=final_json_hash,
                         settings=cfg,
                         voice_adapter=self.voice_adapter,
+                        source_dialogue_map=source_dialogue_input,
                         cancellation_token=cancellation_token,
                     )
                     render_res = render_output(
@@ -1305,6 +1335,7 @@ class ProjectWorkflow:
                         settings=cfg,
                         voice_adapter=self.voice_adapter,
                         narration_audio_map=voice_result.narration_audio_map,
+                        source_dialogue_map=source_dialogue_input,
                         cancellation_token=cancellation_token,
                         progress_callback=tracker.emit_payload,
                     )
@@ -1341,6 +1372,10 @@ class ProjectWorkflow:
                     "output_path": str(render_res.output_path),
                     "narration_srt_path": str(render_res.narration_srt_path),
                     "original_srt_path": str(render_res.original_srt_path),
+                    "narration_srt_hash": compute_file_sha256(render_res.narration_srt_path),
+                    "original_srt_hash": compute_file_sha256(render_res.original_srt_path),
+                    "original_subtitle_state": render_res.original_subtitle_state,
+                    "original_subtitle_cue_count": render_res.original_subtitle_cue_count,
                     "duration": render_res.duration,
                     "fingerprint": cur_fp,
                     "output_file_hash": out_file_hash,

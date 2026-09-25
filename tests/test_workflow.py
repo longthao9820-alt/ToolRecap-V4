@@ -59,6 +59,12 @@ from toolrecap_v4.workflow import (
 )
 
 
+def _write_mock_subtitles(output_dir: Path, title: str) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / f"{title}.narration.srt").write_text("", encoding="utf-8")
+    (output_dir / f"{title}.original.srt").write_text("", encoding="utf-8")
+
+
 def _create_synthetic_video(
     path: Path,
     duration: float = 2.0,
@@ -233,6 +239,7 @@ def test_import_zero_ai(test_storage: ProjectPersistence, sample_video: Path, tm
         out_mp4 = output_dir / "Recap_Import.mp4"
         out_mp4.parent.mkdir(parents=True, exist_ok=True)
         out_mp4.write_bytes(b"dummy mp4")
+        _write_mock_subtitles(output_dir, "Recap_Import")
         return RenderResult(
             output_path=out_mp4,
             narration_srt_path=output_dir / "Recap_Import.narration.srt",
@@ -325,6 +332,7 @@ def test_output_2_fail_resume_skip_1(test_storage: ProjectPersistence, sample_vi
             out_mp4 = output_dir / f"{output_def['title']}.mp4"
             out_mp4.parent.mkdir(parents=True, exist_ok=True)
             out_mp4.write_bytes(b"content for part 1")
+            _write_mock_subtitles(output_dir, output_def["title"])
             return RenderResult(
                 output_path=out_mp4,
                 narration_srt_path=output_dir / f"{output_def['title']}.narration.srt",
@@ -368,6 +376,7 @@ def test_output_2_fail_resume_skip_1(test_storage: ProjectPersistence, sample_vi
         out_mp4 = output_dir / f"{output_def['title']}.mp4"
         out_mp4.parent.mkdir(parents=True, exist_ok=True)
         out_mp4.write_bytes(b"content for part 2")
+        _write_mock_subtitles(output_dir, output_def["title"])
         return RenderResult(
             output_path=out_mp4,
             narration_srt_path=output_dir / f"{output_def['title']}.narration.srt",
@@ -450,6 +459,7 @@ def test_cancel_and_restart(test_storage: ProjectPersistence, sample_video: Path
         out_mp4 = output_dir / f"{output_def['title']}.mp4"
         out_mp4.parent.mkdir(parents=True, exist_ok=True)
         out_mp4.write_bytes(f"bytes for {rid}".encode())
+        _write_mock_subtitles(output_dir, output_def["title"])
 
         if rid == "out-01":
             # Cancel immediately after out-01 finishes
@@ -539,6 +549,7 @@ def test_changed_audio_zero_ai(test_storage: ProjectPersistence, sample_video: P
         out_mp4 = output_dir / f"{output_def['title']}.mp4"
         out_mp4.parent.mkdir(parents=True, exist_ok=True)
         out_mp4.write_bytes(f"rendered pass {render_calls}".encode())
+        _write_mock_subtitles(output_dir, output_def["title"])
         return RenderResult(
             output_path=out_mp4,
             narration_srt_path=output_dir / f"{output_def['title']}.narration.srt",
@@ -802,6 +813,7 @@ def test_validate_completed_output_presence_and_hash_before_skip(
         out_mp4 = output_dir / f"{output_def['title']}.mp4"
         out_mp4.parent.mkdir(parents=True, exist_ok=True)
         out_mp4.write_bytes(f"version {render_calls}".encode())
+        _write_mock_subtitles(output_dir, output_def["title"])
         return RenderResult(
             output_path=out_mp4,
             narration_srt_path=output_dir / f"{output_def['title']}.narration.srt",
@@ -1072,6 +1084,7 @@ def test_dual_stage_render_retry_zero_ai(test_storage: ProjectPersistence, sampl
         out_mp4 = output_dir / "Recap_Render_Fail.mp4"
         out_mp4.parent.mkdir(parents=True, exist_ok=True)
         out_mp4.write_bytes(b"rendered mp4")
+        _write_mock_subtitles(output_dir, "Recap_Render_Fail")
         return RenderResult(
             output_path=out_mp4,
             narration_srt_path=output_dir / "Recap_Render_Fail.narration.srt",

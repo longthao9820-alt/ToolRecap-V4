@@ -217,6 +217,8 @@ def generate_subtitles(
     output_def: dict[str, Any],
     output_dir: Path | str,
     title: str | None = None,
+    *,
+    original_cues: Sequence[SubtitleCue | dict[str, Any]] | None = None,
 ) -> tuple[Path, Path]:
     """Generate both {title}.narration.srt and {title}.original.srt in output_dir.
     
@@ -227,7 +229,8 @@ def generate_subtitles(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     t = title or output_def.get("title") or output_def.get("render_id") or "output"
-    narr_cues, orig_cues = extract_subtitles_for_output(output_def)
+    narr_cues, legacy_orig_cues = extract_subtitles_for_output(output_def)
+    orig_cues = list(original_cues) if original_cues is not None else legacy_orig_cues
 
     narr_path = out_dir / f"{t}.narration.srt"
     orig_path = out_dir / f"{t}.original.srt"

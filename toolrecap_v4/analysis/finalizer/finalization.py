@@ -16,12 +16,13 @@ from toolrecap_v4.errors import CancelledError,FinalJsonMappingError,FinalJsonVa
 from toolrecap_v4.gateway import GatewayClient
 from toolrecap_v4.persistence import ProjectPersistence,atomic_write_json
 from toolrecap_v4.validator import validate_project
+from toolrecap_v4.original_dialogue import narration_contains_source_dialogue
 from toolrecap_v4.analysis.finalizer.writer_contract import (
     SOURCE_CLIP_FIELDS,WRITER_DRAFT_VERSION,WRITER_ROOT_FIELDS,WRITER_SEGMENT_FIELDS,
     parse_json_object,safely_unwrap_single_writer,validation_diagnostics,
 )
 
-VALIDATOR_VERSION="writer-validator-v2";MAPPING_VERSION="writer-to-final-json-v1";REPAIR_PROTOCOL_VERSION="writer-repair-v2"
+VALIDATOR_VERSION="writer-validator-v3";MAPPING_VERSION="writer-to-final-json-v2";REPAIR_PROTOCOL_VERSION="writer-repair-v2"
 def _canon(v):return json.dumps(v,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()
 def _digest(v):return hashlib.sha256(_canon(v)).hexdigest()
 
@@ -75,6 +76,7 @@ class OutputValidator:
             clips=s.get("source_clips",[]) if isinstance(s.get("source_clips"),list) else []
             if not clips:issues.append("SOURCE_CLIP_REQUIRED")
             clean=[]
+            source_dialogue_texts=[]
             for c in clips:
                 ep=self.eps.get(c.get("episode_id")) if isinstance(c,dict) else None
                 if not isinstance(c,dict) or set(c)!=SOURCE_CLIP_FIELDS:issues.append(f"{prefix}_SOURCE_CLIP_SCHEMA_INVALID")
@@ -87,7 +89,17 @@ class OutputValidator:
                 evidence_ground=any((ev:=self.store.get(e,self.plan.evidence_revision)) is not None and ev.episode_id==ep.episode_id and ev.start_ms<=start and end<=ev.end_ms for e in eids)
                 visual_ground=any((vv:=self.visual.get(v)) is not None and vv.episode_id==ep.episode_id and vv.start_ms<=start and end<=vv.end_ms for v in vids)
                 if not (contained or evidence_ground or visual_ground):issues.append("UNGROUNDED_SOURCE_RANGE")
+                source_dialogue_texts.extend(
+                    cue.text for cue in ep.transcript.cues
+                    if cue.start_ms < end and cue.end_ms > start and cue.text.strip()
+                )
                 clean.append({"episode_id":ep.episode_id,"source_id":ep.source_id,"start_ms":start,"end_ms":end})
+            for evidence_id in eids:
+                evidence=self.store.get(evidence_id,self.plan.evidence_revision)
+                if evidence is not None:
+                    source_dialogue_texts.extend(item.text for item in evidence.dialogue if item.text.strip())
+            if narration_contains_source_dialogue(str(s.get("narration_text", "")),source_dialogue_texts):
+                issues.append("SOURCE_DIALOGUE_ROUTED_TO_NARRATION")
             normalized.append({**s,"source_clips":clean})
         issues=tuple(sorted(set(issues)))
         if issues:return ValidationResult(job.output_id,"INVALID_REPAIRABLE",issues,None,artifact_hash,validation_diagnostics(issues,parsed))
@@ -102,7 +114,7 @@ def map_final_json(*,project_id:str,project_name:str,episodes:Sequence[PreparedE
         for s in r.normalized["segments"]:
             for clip_index,c in enumerate(s["source_clips"],1):
                 ep=next(e for e in episodes if e.episode_id==c["episode_id"])
-                segments.append({"segment_id":s["segment_id"] if len(s["source_clips"])==1 else f"{s['segment_id']}-{clip_index:02d}","source_file":ep.source_basename or ep.source_path.name,"start_ms":c["start_ms"],"end_ms":c["end_ms"],"type":"narration","narration":s["narration_text"],"source_audio":False,"subtitles":[]})
+                segments.append({"segment_id":s["segment_id"] if len(s["source_clips"])==1 else f"{s['segment_id']}-{clip_index:02d}","source_file":ep.source_basename or ep.source_path.name,"start_ms":c["start_ms"],"end_ms":c["end_ms"],"type":"narration","narration":s["narration_text"],"source_audio":True,"subtitles":[]})
         outputs.append({"render_id":out["output_id"],"title":r.normalized["title"],"segments":segments})
     return {"schema_version":"3.0","project_id":project_id,"project_name":project_name,"sources":[{"source_file":e.source_basename or e.source_path.name,"duration_ms":e.duration_ms} for e in episodes],"outputs":outputs}
 

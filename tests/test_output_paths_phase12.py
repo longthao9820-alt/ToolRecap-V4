@@ -108,7 +108,9 @@ def _final(project_id, source_name, narration=False):
 
 def _render_result(output_dir):
     output_dir.mkdir(parents=True,exist_ok=True);video=output_dir/"Human Title.mp4";video.write_bytes(b"rendered")
-    return SimpleNamespace(output_path=video,narration_srt_path=output_dir/"Human Title.narration.srt",original_srt_path=output_dir/"Human Title.original.srt",duration=1.0,video_codec="h264",audio_codec="aac",width=640,height=480,fps=25.0)
+    narration=output_dir/"Human Title.narration.srt";original=output_dir/"Human Title.original.srt"
+    narration.write_text("",encoding="utf-8");original.write_text("",encoding="utf-8")
+    return SimpleNamespace(output_path=video,narration_srt_path=narration,original_srt_path=original,duration=1.0,video_codec="h264",audio_codec="aac",width=640,height=480,fps=25.0,original_subtitle_state="NO_ORIGINAL_DIALOGUE",original_subtitle_cue_count=0)
 
 
 def test_imported_final_json_auto_publication_is_clean_and_zero_ai(tmp_path, monkeypatch):
@@ -121,7 +123,7 @@ def test_imported_final_json_auto_publication_is_clean_and_zero_ai(tmp_path, mon
     state=workflow.start_project("project-1")
     assert state["status"]==ProjectStatus.COMPLETED.value and Path(state["output_dir"])==expected
     assert gateway.submit_text_chat.call_count==gateway.submit_image_chat.call_count==0
-    assert {p.name for p in expected.iterdir()}=={"Human Title.mp4"}
+    assert {p.name for p in expected.iterdir()}=={"Human Title.mp4","Human Title.narration.srt","Human Title.original.srt"}
     assert not any(p.suffix in {".json",".wav"} for p in expected.iterdir())
 
 
@@ -161,7 +163,9 @@ def test_partial_three_output_resume_uses_resolved_destination_and_zero_ai(tmp_p
         title=kwargs["output_def"]["title"];calls.append(title)
         output_dir=Path(kwargs["output_dir"]);output_dir.mkdir(parents=True,exist_ok=True)
         video=output_dir/f"{title}.mp4";video.write_bytes(title.encode())
-        return SimpleNamespace(output_path=video,narration_srt_path=output_dir/f"{title}.narration.srt",original_srt_path=output_dir/f"{title}.original.srt",duration=1.0,video_codec="h264",audio_codec="aac",width=640,height=480,fps=25.0)
+        narration=output_dir/f"{title}.narration.srt";original=output_dir/f"{title}.original.srt"
+        narration.write_text("",encoding="utf-8");original.write_text("",encoding="utf-8")
+        return SimpleNamespace(output_path=video,narration_srt_path=narration,original_srt_path=original,duration=1.0,video_codec="h264",audio_codec="aac",width=640,height=480,fps=25.0,original_subtitle_state="NO_ORIGINAL_DIALOGUE",original_subtitle_cue_count=0)
     monkeypatch.setattr("toolrecap_v4.workflow.render_output",render)
     workflow.start_project("project-1")
     (publication/"Part 2.mp4").unlink()

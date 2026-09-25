@@ -66,6 +66,14 @@ from toolrecap_v4.validator import validate_windows_name
 from toolrecap_v4.voice_studio import VoiceStudioAdapter, validate_wav_bytes
 from toolrecap_v4.progress import ActivityState, WorkflowStage, safe_emit
 from toolrecap_v4.narration_fit import resolve_narration_fit
+from toolrecap_v4.original_dialogue import (
+    ORIGINAL_DIALOGUE_MAPPED,
+    ORIGINAL_SUBTITLE_GENERATION_FAILED,
+    NO_ORIGINAL_DIALOGUE,
+    OriginalDialogueMapping,
+    OriginalDialogueSubtitleMapper,
+    ResolvedSourceClip,
+)
 
 
 class RenderError(ToolRecapError):
@@ -95,6 +103,8 @@ class RenderResult:
     width: int
     height: int
     fps: float
+    original_subtitle_state: str = "NO_ORIGINAL_DIALOGUE"
+    original_subtitle_cue_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -109,6 +119,8 @@ class RenderResult:
             "width": self.width,
             "height": self.height,
             "fps": self.fps,
+            "original_subtitle_state": self.original_subtitle_state,
+            "original_subtitle_cue_count": self.original_subtitle_cue_count,
         }
 
 
@@ -288,6 +300,7 @@ def render_output(
     voice_adapter: VoiceStudioAdapter | None = None,
     cancellation_token: CancellationToken | None = None,
     narration_audio_map: dict[str, Path | str] | None = None,
+    source_dialogue_map: dict[str, Sequence[Any]] | None = None,
     ffmpeg_path: Path | str | None = None,
     work_dir: Path | str | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -371,6 +384,8 @@ def render_output(
     try:
         segment_mkv_paths: list[Path] = []
         effective_segment_durations: dict[str, int] = {}
+        resolved_source_clips: list[ResolvedSourceClip] = []
+        final_timeline_offset_ms = 0
         normal_orig_linear, ducked_orig_linear, comm_linear = calculate_ducking_gains(
             cfg.original_audio_db,
             cfg.commentary_audio_db,
@@ -469,6 +484,17 @@ def render_output(
                 emit(WorkflowStage.NARRATION_FIT,state=ActivityState.LOCAL_PROCESSING.value,activity_text=f"Narration {narr_dur_s:.1f}s; visual {planned_seg_dur_ms/1000.0:.1f}s; strategy: {', '.join(fit.strategy)}",current_item=seg_id,completed=seg_idx+1,total=len(segments),unit="segments",stage_status="complete" if seg_idx+1==len(segments) else None)
             else:
                 source_visual_s=seg_dur_s;hold_s=0.0
+
+            resolved_source_clips.append(ResolvedSourceClip(
+                segment_id=seg_id,
+                source_file=src_name,
+                source_start_ms=start_ms,
+                source_end_ms=end_ms,
+                final_start_ms=final_timeline_offset_ms,
+                final_duration_ms=seg_dur_ms,
+                source_audio=source_audio_enabled,
+            ))
+            final_timeline_offset_ms += seg_dur_ms
 
             # Build FFmpeg command for normalized intermediate segment MKV
             seg_mkv = segments_dir / f"seg_{seg_idx:04d}.mkv"
@@ -608,7 +634,50 @@ def render_output(
             duration = effective_segment_durations.get(subtitle_segment.get("segment_id"))
             if duration is not None:
                 subtitle_segment["end_ms"] = int(subtitle_segment.get("start_ms", 0)) + duration
-        temp_narr_srt, temp_orig_srt = generate_subtitles(subtitle_output, temp_dir, title=title)
+        emit(
+            WorkflowStage.SUBTITLES,
+            state=ActivityState.LOCAL_PROCESSING.value,
+            activity_text="Mapping original dialogue...",
+            current_item=render_id, completed=0, total=1, unit="outputs",
+        )
+        if source_dialogue_map is None:
+            legacy_original_cues = tuple(extract_subtitles_for_output(subtitle_output)[1])
+            original_mapping = OriginalDialogueMapping(
+                legacy_original_cues,
+                ORIGINAL_DIALOGUE_MAPPED if legacy_original_cues else NO_ORIGINAL_DIALOGUE,
+                len(legacy_original_cues),
+            )
+        else:
+            original_mapping = OriginalDialogueSubtitleMapper(source_dialogue_map).map(resolved_source_clips)
+        if original_mapping.state == ORIGINAL_SUBTITLE_GENERATION_FAILED:
+            raise RenderValidationError(
+                f"Verified source dialogue exists but no publication cues were generated for '{render_id}'."
+            )
+        temp_narr_srt, temp_orig_srt = generate_subtitles(
+            subtitle_output, temp_dir, title=title, original_cues=original_mapping.cues,
+        )
+        if original_mapping.state == ORIGINAL_DIALOGUE_MAPPED and (
+            not temp_orig_srt.is_file() or not temp_orig_srt.read_text(encoding="utf-8").strip()
+        ):
+            raise RenderValidationError(
+                f"Original subtitle publication is empty despite verified retained dialogue for '{render_id}'."
+            )
+        narration_cue_count = len(extract_subtitles_for_output(subtitle_output)[0])
+        narration_expected = any(
+            segment.get("type") == "narration" and str(segment.get("narration", "")).strip()
+            for segment in subtitle_output.get("segments", [])
+        )
+        if narration_expected and (
+            narration_cue_count == 0 or not temp_narr_srt.read_text(encoding="utf-8").strip()
+        ):
+            raise RenderValidationError(f"Narration exists but narration SRT is empty for '{render_id}'.")
+        emit(
+            WorkflowStage.SUBTITLES,
+            state=ActivityState.LOCAL_PROCESSING.value,
+            activity_text=(f"Mapping original dialogue... Narration cues: {narration_cue_count}; "
+                           f"Original dialogue cues: {len(original_mapping.cues)}"),
+            current_item=render_id, completed=1, total=1, unit="outputs", stage_status="complete",
+        )
 
         # Two-pass Loudnorm: Pass 1 (measurement)
         measured_params = measure_loudnorm(
@@ -720,6 +789,8 @@ def render_output(
             width=final_probe.width,
             height=final_probe.height,
             fps=final_probe.fps,
+            original_subtitle_state=original_mapping.state,
+            original_subtitle_cue_count=len(original_mapping.cues),
         )
 
     finally:
@@ -736,6 +807,7 @@ def render_project(
     voice_adapter: VoiceStudioAdapter | None = None,
     cancellation_token: CancellationToken | None = None,
     narration_audio_map: dict[str, Path | str] | None = None,
+    source_dialogue_map: dict[str, Sequence[Any]] | None = None,
     ffmpeg_path: Path | str | None = None,
     work_dir: Path | str | None = None,
 ) -> list[RenderResult]:
@@ -763,6 +835,7 @@ def render_project(
             voice_adapter=voice_adapter,
             cancellation_token=cancellation_token,
             narration_audio_map=narration_audio_map,
+            source_dialogue_map=source_dialogue_map,
             ffmpeg_path=ffmpeg_path,
             work_dir=work_dir,
         )

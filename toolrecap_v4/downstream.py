@@ -11,12 +11,14 @@ import tempfile
 from typing import Any, Callable
 
 from toolrecap_v4.cancellation import CancellationToken
-from toolrecap_v4.errors import VoiceStudioUnavailableError
+from toolrecap_v4.errors import SourceDialogueNarrationError, VoiceStudioUnavailableError
 from toolrecap_v4.persistence import atomic_write_json
 from toolrecap_v4.settings import AppSettings
 from toolrecap_v4.voice_studio import VoiceStudioAdapter, validate_wav_bytes
 from toolrecap_v4.media import find_binary,run_command
 from toolrecap_v4.progress import ActivityState, WorkflowStage, safe_emit
+from toolrecap_v4.original_dialogue import narration_contains_source_dialogue
+from toolrecap_v4.subtitles import SubtitleCue
 
 VOICE_CACHE_VERSION = "downstream-voice-v1"
 
@@ -68,6 +70,7 @@ class DownstreamVoiceCache:
         final_json_hash: str,
         settings: AppSettings,
         voice_adapter: VoiceStudioAdapter | None,
+        source_dialogue_map: dict[str, tuple[SubtitleCue, ...]] | None = None,
         cancellation_token: CancellationToken | None = None,
     ) -> VoiceCacheResult:
         result: dict[str, Path] = {}
@@ -87,6 +90,15 @@ class DownstreamVoiceCache:
             if cancellation_token:
                 cancellation_token.check_cancelled()
             segment_id = segment["segment_id"]
+            source_dialogue = source_dialogue_map.get(str(segment.get("source_file", "")), ()) if source_dialogue_map else ()
+            dialogue_texts = [
+                cue.text for cue in source_dialogue
+                if cue.start_ms < int(segment.get("end_ms", 0)) and cue.end_ms > int(segment.get("start_ms", 0))
+            ]
+            if narration_contains_source_dialogue(str(segment["narration"]), dialogue_texts):
+                raise SourceDialogueNarrationError(
+                    f"Segment '{segment_id}' contains verified source dialogue and is forbidden from VoiceStudio."
+                )
             dependencies = {
                 "version": VOICE_CACHE_VERSION,
                 "final_json_hash": final_json_hash,

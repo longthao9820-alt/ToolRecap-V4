@@ -55,6 +55,7 @@ class WorkflowStage(str, enum.Enum):
     VOICE = "voice"
     NARRATION_FIT = "narration_fit"
     AUDIO_MIX = "audio_mix"
+    SUBTITLES = "subtitles"
     RENDER = "render"
     PUBLISH = "publish"
 
@@ -72,6 +73,7 @@ STAGE_LABELS: dict[str, str] = {
     WorkflowStage.VOICE.value: "Generating Voice",
     WorkflowStage.NARRATION_FIT.value: "Fitting Video to Narration",
     WorkflowStage.AUDIO_MIX.value: "Mixing Audio",
+    WorkflowStage.SUBTITLES.value: "Building Subtitles",
     WorkflowStage.RENDER.value: "Rendering Video",
     WorkflowStage.PUBLISH.value: "Publishing Output",
 }

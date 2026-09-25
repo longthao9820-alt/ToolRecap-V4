@@ -150,7 +150,10 @@ def test_workflow_reaches_catalog_ready_and_stops_before_phase6(tmp_path, monkey
         if render_calls["count"]==1:
             raise RuntimeError("simulated downstream render failure")
         destination=Path(kwargs["output_dir"]);out=destination/"Generated_Output.mp4";out.parent.mkdir(parents=True,exist_ok=True);out.write_bytes(b"rendered")
-        return SimpleNamespace(output_path=out,narration_srt_path=destination/"Generated_Output.narration.srt",original_srt_path=destination/"Generated_Output.original.srt",duration=2.0,video_codec="h264",audio_codec="aac",width=640,height=480,fps=25.0)
+        narration=destination/"Generated_Output.narration.srt";original=destination/"Generated_Output.original.srt"
+        narration.write_text("1\n00:00:00,000 --> 00:00:01,000\nSpoken narration.\n",encoding="utf-8")
+        original.write_text("",encoding="utf-8")
+        return SimpleNamespace(output_path=out,narration_srt_path=narration,original_srt_path=original,duration=2.0,video_codec="h264",audio_codec="aac",width=640,height=480,fps=25.0,original_subtitle_state="NO_ORIGINAL_DIALOGUE",original_subtitle_cue_count=0)
     monkeypatch.setattr("toolrecap_v4.workflow.render_output",fake_render)
     gateway_calls=len(gateway.calls)
     with pytest.raises(RuntimeError,match="simulated downstream render failure"):

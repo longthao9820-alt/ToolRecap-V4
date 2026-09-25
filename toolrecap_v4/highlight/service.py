@@ -230,9 +230,16 @@ class HighlightWorkflow:
             ):
                 continue
             result = render_highlight(output, sources=source_paths, publication_dir=publication, cancellation_token=cancellation_token)
+            self._emit(
+                "Building Original Dialogue SRT",
+                f"Mapped {result.original_subtitle_cue_count} verified original dialogue cues for {output.output_id}",
+                index, len(project.outputs),
+            )
             state["outputs"][output.output_id] = {
                 "status": "completed", "video_path": str(result.video_path), "subtitle_path": str(result.subtitle_path),
                 "video_sha256": result.video_sha256, "subtitle_sha256": result.subtitle_sha256,
+                "original_subtitle_state": result.original_subtitle_state,
+                "original_subtitle_cue_count": result.original_subtitle_cue_count,
             }
             self.persistence.save_project(state)
         state["status"] = ProjectStatus.COMPLETED.value

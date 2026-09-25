@@ -108,6 +108,7 @@ ISSUE_PATHS = {
     "OUTPUT_ID_MISMATCH": "identity mismatch: $.output_id",
     "MISSING_TITLE": "required root field missing/empty: $.title",
     "MISSING_NARRATION": "required root field missing/empty: $.narration.text",
+    "SOURCE_DIALOGUE_ROUTED_TO_NARRATION": "source character dialogue is forbidden from $.segments[*].narration_text",
     "SEGMENTS_REQUIRED": "required root field missing/empty: $.segments",
 }
 
