@@ -80,11 +80,18 @@ def render_highlight(
         staged_video = temp / "highlight.mp4"
         staged_srt = temp / "highlight.srt"
         duration = (output.end_ms - output.start_ms) / 1000.0
+        decode_args = nvidia_decode_args(source_codec, selected_encoder, source_pixel_format)
+        nvenc_format_args = (
+            ["-vf", "scale_cuda=format=nv12"]
+            if selected_encoder.encoder == "h264_nvenc" and decode_args
+            else []
+        )
         args = [
             str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
             "-accurate_seek", "-ss", f"{output.start_ms / 1000.0:.3f}",
-            *nvidia_decode_args(source_codec, selected_encoder, source_pixel_format), "-i", str(source),
+            *decode_args, "-i", str(source),
             "-t", f"{duration:.3f}", "-map", "0:v:0", "-map", "0:a?",
+            *nvenc_format_args,
             *video_args,
             "-c:a", "aac", "-b:a", "192k", "-avoid_negative_ts", "make_zero",
             str(staged_video),
@@ -97,7 +104,7 @@ def render_highlight(
             raise
         if result.exit_code != 0 or not staged_video.is_file():
             prefix = "NVIDIA GPU render unavailable: NVENC initialization failed" if selected_encoder.encoder == "h264_nvenc" else "Highlight render failed"
-            raise RuntimeError(f"{prefix}: {result.stderr[-500:]}")
+            raise RuntimeError(f"{prefix}: {result.stderr[-3000:]}")
         staged_srt.write_text(highlight_srt(output), encoding="utf-8", newline="\n")
         if cancellation_token:
             cancellation_token.check_cancelled()

@@ -129,10 +129,11 @@ def test_highlight_nvidia_command_uses_cuvid_nvenc_no_copy_and_exact_bounds(tmp_
         project.outputs[0], sources={"e01.mp4": source}, publication_dir=tmp_path / "gpu",
         ffmpeg_path=ffmpeg, command_runner=runner, settings=AppSettings(use_gpu=True),
         encoder_status=EncoderStatus(True, "RTX 3060", "h264_nvenc", "NVIDIA NVENC"),
-        source_codec="h264",
+        source_codec="hevc", source_pixel_format="yuv420p10le",
     )
     args = commands[0]
-    assert "h264_cuvid" in args and "h264_nvenc" in args
+    assert "hevc_cuvid" in args and "h264_nvenc" in args
+    assert "scale_cuda=format=nv12" in args
     assert not any(args[index:index + 2] == ["-c:v", "copy"] for index in range(len(args) - 1))
     assert args[args.index("-ss") + 1] == "10.000"
     assert args[args.index("-t") + 1] == "10.000"
