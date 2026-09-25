@@ -448,6 +448,7 @@ class ProjectWorkflow:
         now_iso = datetime.now(timezone.utc).isoformat()
         state: Dict[str, Any] = {
             "schema_version": "3.0",
+            "project_mode": "RECAP",
             "project_id": project_id,
             "project_name": project_name,
             "status": ProjectStatus.CREATED.value,
@@ -535,6 +536,7 @@ class ProjectWorkflow:
         now_iso = datetime.now(timezone.utc).isoformat()
         state: Dict[str, Any] = {
             "schema_version": "3.0",
+            "project_mode": "RECAP",
             "project_id": project_id,
             "project_name": project_name,
             "status": ProjectStatus.ANALYZED.value,

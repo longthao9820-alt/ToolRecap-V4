@@ -1,4 +1,4 @@
-"""Settings dialog for ToolRecap V4 with 4 sidebar panes matching V2 visual layout.
+"""Embedded settings page for ToolRecap V4.
 
 Invariants:
 - Exactly 4 sidebar panes: Recap, AI Gateway, Voice, Render and Output.
@@ -72,6 +72,8 @@ class _NotebookCompat:
             cur = self._dialog._current_pane
             if cur == "Recap":
                 return "tab_prompt"
+            if cur == "Highlight":
+                return "tab_highlight"
             if cur == "AI Gateway":
                 return "tab_gw"
             if cur == "Voice":
@@ -91,11 +93,13 @@ class _NotebookCompat:
 
     def index(self, tab_id: Any) -> int:
         if tab_id == "end":
-            return 7
+            return 8
         if tab_id in (0, "tab_gw"):
             return 0
         if tab_id in (1, "tab_prompt", "tab_recap"):
             return 1
+        if tab_id in (7, "tab_highlight"):
+            return 7
         if tab_id in (2, "tab_voice"):
             return 2
         if tab_id in (3, "tab_audio"):
@@ -118,14 +122,18 @@ class _NotebookCompat:
                 "tab_render": 4,
                 "tab_notify": 5,
                 "tab_update": 6,
+                "tab_highlight": 7,
             }
             return mapping.get(cur_sel, 0)
         return 0
 
 
-class SettingsDialog(tk.Toplevel):
-    """Central settings window with four sidebar panes matching V2 visual layout:
-    Recap, AI Gateway, Voice, Render and Output.
+class SettingsDialog(ttk.Frame):
+    """The single authoritative Settings UI, embedded in the main window.
+
+    The historical class name is retained for import compatibility.  This is a
+    normal ``ttk.Frame``: it never creates an OS window, modal grab, or taskbar
+    entry.
     """
 
     def __init__(
@@ -159,12 +167,6 @@ class SettingsDialog(tk.Toplevel):
         self._current_pane = "Recap"
         self.notebook = _NotebookCompat(self)
 
-        self.title("Cài đặt — ToolRecap V4")
-        self.geometry("920x680")
-        self.minsize(840, 600)
-        self.transient(parent)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-
         self._init_variables()
         self._build_ui()
         self._load_values()
@@ -174,58 +176,18 @@ class SettingsDialog(tk.Toplevel):
         else:
             self._show_pane("Recap")
 
-        self._recover_geometry()
-        self._begin_modal()
-        self.bind("<Escape>", lambda e: self._on_close())
         self._ui_poll_job = self.after(25, self._poll_ui_queue)
 
-    def _begin_modal(self) -> None:
-        """Establish a controlled grab only after the owned window is visible."""
-        self.deiconify()
-        self._recover_geometry()
-        self.lift()
-        self.focus_set()
-        self.grab_set()
-
     def activate(self) -> bool:
-        """Restore and foreground this owned dialog after explicit app activation."""
+        """Raise this embedded page without changing OS-level window state."""
         if self._closed or not self.winfo_exists():
             return False
         try:
-            if self.state() in ("withdrawn", "iconic"):
-                self.deiconify()
-            self._recover_geometry()
-            self.lift()
+            self.tkraise()
             self.focus_set()
-            if str(self) not in str(self.grab_current()):
-                self.grab_set()
             return True
         except tk.TclError:
             return False
-
-    def _recover_geometry(self) -> None:
-        """Keep the dialog on the current virtual desktop after monitor changes."""
-        try:
-            self.update_idletasks()
-            width = max(self.winfo_width(), 840)
-            height = max(self.winfo_height(), 600)
-            x = self.winfo_rootx()
-            y = self.winfo_rooty()
-            vx = self.winfo_vrootx()
-            vy = self.winfo_vrooty()
-            vw = self.winfo_vrootwidth()
-            vh = self.winfo_vrootheight()
-            visible = x + width > vx and x < vx + vw and y + height > vy and y < vy + vh
-            if not visible:
-                parent = self.parent
-                parent.update_idletasks()
-                px, py = parent.winfo_rootx(), parent.winfo_rooty()
-                pw, ph = max(parent.winfo_width(), 1), max(parent.winfo_height(), 1)
-                x = px + max(0, (pw - width) // 2)
-                y = py + max(0, (ph - height) // 2)
-                self.geometry(f"{width}x{height}+{x}+{y}")
-        except tk.TclError:
-            pass
 
     def _post_ui(self, callback: Callable[[], None]) -> None:
         """Marshal worker results to Tk's thread; synchronous tests remain deterministic."""
@@ -260,6 +222,7 @@ class SettingsDialog(tk.Toplevel):
         self.content_type_var = tk.StringVar(value=getattr(val, "content_type", "US_TV_SHOW") or "US_TV_SHOW")
         self.rights_var = tk.StringVar(value=getattr(val, "source_rights_status", "UNVERIFIED") or "UNVERIFIED")
         self.var_prompt_status = tk.StringVar()
+        self.highlight_prompt_var = tk.StringVar(value=getattr(val, "highlight_prompt", ""))
 
         # Phase 10 provider-neutral Scanner / Vision / Finalizer settings.
         self.gateway_enabled_var = tk.BooleanVar(value=True)
@@ -387,21 +350,64 @@ class SettingsDialog(tk.Toplevel):
         self.txt_prompt.delete("1.0", tk.END)
         self.txt_prompt.insert("1.0", self.settings.prompt)
         self._update_prompt_status()
+        self.highlight_prompt_var.set(getattr(self.settings, "highlight_prompt", ""))
+        if hasattr(self, "txt_highlight_prompt"):
+            self.txt_highlight_prompt.delete("1.0", tk.END)
+            self.txt_highlight_prompt.insert("1.0", self.highlight_prompt_var.get())
+
+    def _reload_non_prompt_values(self) -> None:
+        """Restore widgets from the last persisted settings snapshot."""
+        val = self.settings
+        assignments = (
+            (self.recap_language_var, val.recap_language), (self.recap_mode_var, val.recap_mode),
+            (self.content_type_var, val.content_type), (self.rights_var, val.source_rights_status),
+            (self.var_gw_endpoint, val.gateway_endpoint), (self.var_gw_sub_model, val.scanner_model),
+            (self.var_gw_sub_reasoning, val.scanner_reasoning), (self.var_scanner_parallelism, val.scanner_parallelism),
+            (self.var_scanner_chunk_ms, val.scanner_chunk_duration_ms), (self.var_vision_model, val.vision_model),
+            (self.var_vision_reasoning, val.vision_reasoning), (self.var_voice_mode, val.voice_mode),
+            (self.var_voice_local, val.voice_local_url), (self.var_voice_remote, val.voice_remote_url),
+            (self.var_voice_lang, val.voice_language), (self.var_voice_style, val.voice_style),
+            (self.var_commentary_speed, f"{val.commentary_reading_speed:.2f}x"),
+            (self.var_orig_db, val.original_audio_db), (self.var_comm_db, val.commentary_audio_db),
+            (self.var_auto_duck, val.auto_duck), (self.var_duck_db, val.ducking_amount_db),
+            (self.var_target_lufs, val.target_loudness_lufs), (self.var_true_peak, val.true_peak_db),
+            (self.var_out_dir, val.output_dir), (self.var_use_gpu, val.use_gpu),
+            (self.var_quality, val.quality), (self.var_codec, val.video_codec),
+            (self.var_canvas_w, val.canvas_width), (self.var_canvas_h, val.canvas_height),
+            (self.var_canvas_fps, val.canvas_fps), (self.var_burn_subs, val.burn_subtitles),
+            (self.var_out_format, val.output_format), (self.var_update_repo, val.update_repo),
+        )
+        for variable, value in assignments:
+            variable.set(value)
+        prime_model, prime_reasoning, _ = val.finalizer_ui_values()
+        self.var_gw_prime_model.set(prime_model)
+        self.var_gw_prime_reasoning.set(prime_reasoning)
+        self.var_voice_id.set(get_voice_display_name(val.voice_id or DEFAULT_V2_VOICE_ID))
 
     # -------------------------------------------------------------------------
     # MAIN UI SHELL
     # -------------------------------------------------------------------------
     def _build_ui(self) -> None:
-        root = ttk.Frame(self, padding=12)
-        root.pack(fill="both", expand=True)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        root = ttk.Frame(canvas, padding=12)
+        window_id = canvas.create_window((0, 0), window=root, anchor="nw")
+        root.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window_id, width=e.width))
+        self.settings_canvas = canvas
         root.columnconfigure(1, weight=1)
         root.rowconfigure(0, weight=1)
 
-        # Sidebar with exactly 4 panes matching V2 visual layout
+        # Settings-local navigation remains embedded in the main application.
         sidebar = ttk.Frame(root, padding=(0, 4, 12, 4))
         sidebar.grid(row=0, column=0, sticky="ns")
 
-        for name in ("Recap", "AI Gateway", "Voice", "Render and Output"):
+        for name in ("Recap", "Highlight", "AI Gateway", "Voice", "Render and Output"):
             btn = ttk.Button(
                 sidebar,
                 text=name,
@@ -417,6 +423,7 @@ class SettingsDialog(tk.Toplevel):
         host.rowconfigure(0, weight=1)
 
         self._panes["Recap"] = self._build_recap(host)
+        self._panes["Highlight"] = self._build_highlight(host)
         self._panes["AI Gateway"] = self._build_ai(host)
         self._panes["Voice"] = self._build_voice(host)
         self._panes["Render and Output"] = self._build_render(host)
@@ -424,13 +431,13 @@ class SettingsDialog(tk.Toplevel):
         for pane in self._panes.values():
             pane.grid(row=0, column=0, sticky="nsew")
 
-        bottom = ttk.Frame(root)
-        bottom.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        bottom = ttk.Frame(self, padding=(12, 8))
+        bottom.grid(row=1, column=0, columnspan=2, sticky="ew")
 
         self.lbl_status = ttk.Label(bottom, text="", foreground="#1E40AF", font=("Segoe UI", 9))
         self.lbl_status.pack(side="left", padx=4)
 
-        ttk.Button(bottom, text="Hủy", command=self._on_close).pack(side="right")
+        ttk.Button(bottom, text="Hoàn tác", command=self._on_close).pack(side="right")
         self.btn_save = ttk.Button(
             bottom,
             text="Lưu cài đặt",
@@ -484,6 +491,8 @@ class SettingsDialog(tk.Toplevel):
             s = tab.strip().lower()
             if s in ("recap", "prompt"):
                 self._show_pane("Recap")
+            elif s in ("highlight", "highlights", "tab_highlight"):
+                self._show_pane("Highlight")
             elif s in ("gateway", "gw", "ai", "ai gateway"):
                 self._show_pane("AI Gateway")
             elif s in ("voice", "voicestudio"):
@@ -586,6 +595,32 @@ class SettingsDialog(tk.Toplevel):
     def _clear_prompt(self) -> None:
         self.txt_prompt.delete("1.0", tk.END)
         self._update_prompt_status()
+
+    def _build_highlight(self, parent: ttk.Frame) -> ttk.Frame:
+        frame = ttk.Frame(parent)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(2, weight=1)
+        ttk.Label(frame, text="Highlight", font=("Segoe UI Semibold", 14)).grid(
+            row=0, column=0, sticky="w", pady=(0, 6)
+        )
+        ttk.Label(
+            frame,
+            text=("Highlight Prompt controls editorial scene discovery only. "
+                  "ToolRecap's versioned schema and validation rules remain authoritative."),
+            wraplength=690,
+            foreground="#475569",
+        ).grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        text_frame = ttk.Frame(frame)
+        text_frame.grid(row=2, column=0, sticky="nsew")
+        text_frame.columnconfigure(0, weight=1)
+        text_frame.rowconfigure(0, weight=1)
+        self.txt_highlight_prompt = tk.Text(text_frame, wrap="word", height=18, font=("Segoe UI", 9))
+        self.txt_highlight_prompt.insert("1.0", self.highlight_prompt_var.get())
+        scroll = ttk.Scrollbar(text_frame, orient="vertical", command=self.txt_highlight_prompt.yview)
+        self.txt_highlight_prompt.configure(yscrollcommand=scroll.set)
+        self.txt_highlight_prompt.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        return frame
 
     # -------------------------------------------------------------------------
     # PANE 2: AI GATEWAY (provider-neutral Scanner / Vision / Finalizer)
@@ -1370,7 +1405,6 @@ class SettingsDialog(tk.Toplevel):
             msg = "Chưa cấu hình kho lưu trữ cập nhật (Not configured). Vui lòng nhập kho lưu trữ GitHub (owner/repo)."
             self.lbl_update_status.config(text="Chưa cấu hình kho lưu trữ cập nhật (Not configured)", foreground="#D97706")
             self.lbl_update_result.config(text=msg, foreground="#D97706")
-            messagebox.showinfo("Cập nhật hệ thống", msg, parent=self)
             return
 
         self.lbl_update_status.config(text="Đang kiểm tra bản cập nhật...", foreground="#2563EB")
@@ -1392,7 +1426,6 @@ class SettingsDialog(tk.Toplevel):
         self.btn_check_update.config(state="normal")
         self.lbl_update_status.config(text="Lỗi kiểm tra cập nhật", foreground="#DC2626")
         self.lbl_update_result.config(text=f"Lỗi: {error}", foreground="#DC2626")
-        messagebox.showerror("Lỗi cập nhật", str(error), parent=self)
 
     def _finish_update_check(self, result: UpdateCheckResult) -> None:
         if self._closed:
@@ -1403,13 +1436,11 @@ class SettingsDialog(tk.Toplevel):
         if result.status == "not_configured":
             self.lbl_update_status.config(text=result.message, foreground="#D97706")
             self.lbl_update_result.config(text=result.message, foreground="#D97706")
-            messagebox.showinfo("Cập nhật hệ thống", result.message, parent=self)
         elif result.status == "up_to_date":
             self.lbl_update_status.config(text="Đã cập nhật mới nhất", foreground="#16A34A")
             self.lbl_update_result.config(text=result.message, foreground="#16A34A")
             self.btn_download_update.config(state="disabled")
             self.btn_apply_update.config(state="disabled")
-            messagebox.showinfo("Cập nhật hệ thống", result.message, parent=self)
         elif result.status == "update_available":
             self.lbl_update_status.config(text=f"Có bản cập nhật mới v{result.latest_version}", foreground="#2563EB")
             self.lbl_update_result.config(text=result.message, foreground="#2563EB")
@@ -1418,7 +1449,6 @@ class SettingsDialog(tk.Toplevel):
         else:
             self.lbl_update_status.config(text="Lỗi kiểm tra cập nhật", foreground="#DC2626")
             self.lbl_update_result.config(text=result.message, foreground="#DC2626")
-            messagebox.showerror("Lỗi cập nhật", result.message, parent=self)
 
     def _download_update(self) -> None:
         if not self._last_check_result or self._last_check_result.status != "update_available":
@@ -1455,11 +1485,10 @@ class SettingsDialog(tk.Toplevel):
         self.lbl_update_status.config(text="Tải bản cập nhật thất bại", foreground="#DC2626")
         self.lbl_update_result.config(text=f"Lỗi: {error}", foreground="#DC2626")
         self.btn_download_update.config(state="normal")
-        messagebox.showerror("Lỗi tải bản cập nhật", str(error), parent=self)
 
     def _apply_update(self) -> None:
         if hasattr(self.parent, "worker") and getattr(self.parent.worker, "is_running", False):
-            messagebox.showwarning("Đang xử lý", "Chờ dự án dừng trước khi cập nhật.", parent=self)
+            self.lbl_update_result.config(text="Chờ dự án dừng trước khi cập nhật.", foreground="#D97706")
             return
         if not self._staged_update_path or not self._last_check_result:
             return
@@ -1482,7 +1511,7 @@ class SettingsDialog(tk.Toplevel):
             if self.parent:
                 self.parent.destroy()
         except Exception as e:
-            messagebox.showerror("Lỗi áp dụng cập nhật", str(e), parent=self)
+            self.lbl_update_result.config(text=f"Lỗi áp dụng cập nhật: {e}", foreground="#DC2626")
 
     # -------------------------------------------------------------------------
     # SAVE & VALIDATION
@@ -1533,6 +1562,7 @@ class SettingsDialog(tk.Toplevel):
             self.settings.content_type = self.content_type_var.get()
             self.settings.source_rights_status = self.rights_var.get()
             self.settings.prompt = self.txt_prompt.get("1.0", "end-1c")
+            self.settings.highlight_prompt = self.txt_highlight_prompt.get("1.0", "end-1c")
 
             self.settings.voice_mode = self.var_voice_mode.get().strip()
             self.settings.voice_local_url = vs_local
@@ -1588,7 +1618,11 @@ class SettingsDialog(tk.Toplevel):
                 self.on_saved(self.settings)
 
             self.lbl_status.config(text="✓ Đã lưu cài đặt thành công!", foreground="#16A34A")
-            self.after(400, self._on_close)
+            if getattr(getattr(self.parent, "worker", None), "is_running", False):
+                self.lbl_status.config(
+                    text="✓ Đã lưu. Thay đổi sẽ áp dụng cho lần chạy phù hợp tiếp theo.",
+                    foreground="#D97706",
+                )
 
         except Exception as e:
             self.settings = original_settings
@@ -1596,13 +1630,17 @@ class SettingsDialog(tk.Toplevel):
                 str(e),
                 [self.var_gw_key.get(), self.var_voice_key.get()],
             )
-            messagebox.showerror("Lỗi xác thực cài đặt", safe_error, parent=self)
+            self.lbl_status.config(text=f"⚠ {safe_error}", foreground="#DC2626")
 
     def _on_close(self) -> None:
-        self.destroy()
+        """Revert unsaved edits without closing the application or this page."""
+        self.settings = self.settings_manager.load()
+        self._load_values()
+        self._reload_non_prompt_values()
+        self.lbl_status.config(text="Đã hoàn tác các thay đổi chưa lưu.", foreground="#475569")
 
     def destroy(self) -> None:
-        """Exception-safe modal cleanup for Save, Cancel, X, Escape, and shutdown."""
+        """Cancel page-owned callbacks during main-window shutdown."""
         if self._closed:
             return
         self._closed = True
@@ -1612,12 +1650,6 @@ class SettingsDialog(tk.Toplevel):
             except Exception:
                 pass
             self._ui_poll_job = None
-        try:
-            current_grab = self.grab_current()
-            if current_grab and str(self) in str(current_grab):
-                self.grab_release()
-        except Exception:
-            pass
         try:
             super().destroy()
         finally:

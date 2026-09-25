@@ -435,8 +435,10 @@ def test_settings_dialog_update_tab_wiring(tmp_path: Path):
         dialog.var_update_repo.set("")
         with patch("toolrecap_v4.ui.settings_dialog.messagebox.showinfo") as mock_info:
             dialog._check_update()
-            mock_info.assert_called_once()
-            assert "Chưa cấu hình" in mock_info.call_args[0][1]
+            mock_info.assert_not_called()
+            assert "Not configured" in dialog.lbl_update_status.cget("text")
+            assert "Not configured" in dialog.lbl_update_result.cget("text")
+            assert "Chưa cấu hình" in dialog.lbl_update_result.cget("text")
 
         # Configure repository
         dialog.var_update_repo.set("myorg/myrepo")

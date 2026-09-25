@@ -318,11 +318,16 @@ class MainWindow(tk.Tk):
         self._activity_timer_job: Optional[str] = None
         self._dots_job: Optional[str] = None
         self._dots_phase = 1
-        self.active_modal: Optional[tk.Toplevel] = None
+        # Compatibility alias: Settings is now an embedded Frame, never a modal.
+        self.active_modal: Optional[SettingsDialog] = None
+        self.settings_page: Optional[SettingsDialog] = None
+        self.current_page = "recap"
+        self._discovery_mode = "recap"
         self._shutting_down = False
 
         self.settings = self.settings_manager.load()
         self.discovered_sources: List[SourceFingerprint] = []
+        self.highlight_sources: List[SourceFingerprint] = []
         self.current_project_id: Optional[str] = None
         self.current_project_name: Optional[str] = None
         self._resume_project_ids: Dict[str, str] = {}
@@ -330,6 +335,7 @@ class MainWindow(tk.Tk):
 
         # Tkinter variables matching V2
         self.source_var = tk.StringVar(value="Chưa chọn video hoặc thư mục.")
+        self.highlight_source_var = tk.StringVar(value="No highlight source selected.")
         self.status_var = tk.StringVar(value="Sẵn sàng.")
         self.progress_var = tk.DoubleVar(value=0.0)
         self.progress_label_var = tk.StringVar(value="0%")
@@ -389,7 +395,8 @@ class MainWindow(tk.Tk):
         container = ttk.Frame(self, padding=16)
         container.pack(fill="both", expand=True)
         container.columnconfigure(0, weight=1)
-        container.rowconfigure(3, weight=1)
+        container.rowconfigure(2, weight=1)
+        self.main_container = container
 
         # 1. Top Header
         header = ttk.Frame(container)
@@ -403,21 +410,37 @@ class MainWindow(tk.Tk):
             style="Subtitle.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
+        nav_box = ttk.Frame(header)
+        nav_box.grid(row=0, column=2, rowspan=2, sticky="e")
+        self.page_buttons: Dict[str, ttk.Button] = {}
+        for key, label in (("recap", "Recap"), ("highlight", "Highlight"), ("settings", "Settings")):
+            button = ttk.Button(nav_box, text=label, command=lambda page=key: self._show_page(page))
+            button.pack(side="left", padx=3)
+            self.page_buttons[key] = button
         btn_box = ttk.Frame(header)
-        btn_box.grid(row=0, column=2, rowspan=2, sticky="e")
+        btn_box.grid(row=0, column=3, rowspan=2, sticky="e", padx=(8, 0))
         self.update_btn = ttk.Button(btn_box, text="🔄 Kiểm tra cập nhật", command=self._on_check_update)
         self.update_btn.pack(side="left", padx=4)
-        self.settings_btn = ttk.Button(btn_box, text="⚙ Settings", command=self._on_open_settings)
-        self.settings_btn.pack(side="left", padx=4)
+        self.settings_btn = self.page_buttons["settings"]
 
         # 2. Notification Banner (with visible [X])
         self.banner = NotificationBanner(container, on_dismiss=self._on_banner_dismissed)
         self.banner.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         self.banner.grid_remove()
 
-        # 3. Movie Source Section (Clean, without voice selector)
-        source_box = ttk.LabelFrame(container, text="Movie Source", padding=12)
-        source_box.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        # 3. Single-window page host. All workspaces are persistent Frames.
+        self.workspace_host = ttk.Frame(container)
+        self.workspace_host.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
+        self.workspace_host.columnconfigure(0, weight=1)
+        self.workspace_host.rowconfigure(0, weight=1)
+        self.recap_page = ttk.Frame(self.workspace_host)
+        self.recap_page.grid(row=0, column=0, sticky="nsew")
+        self.recap_page.columnconfigure(0, weight=1)
+        self.recap_page.rowconfigure(1, weight=1)
+
+        # Recap workspace
+        source_box = ttk.LabelFrame(self.recap_page, text="Movie Source", padding=12)
+        source_box.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         source_box.columnconfigure(0, weight=1)
 
         src_btn_bar = ttk.Frame(source_box)
@@ -448,8 +471,8 @@ class MainWindow(tk.Tk):
         self.btn_resume_saved.pack(side="left")
 
         # 4. Source Episodes & Queue Table Frame (5 columns)
-        queue_frame = ttk.LabelFrame(container, text="Source Episodes & Output Queue", padding=8)
-        queue_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
+        queue_frame = ttk.LabelFrame(self.recap_page, text="Source Episodes & Output Queue", padding=8)
+        queue_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
         queue_frame.columnconfigure(0, weight=1)
         queue_frame.rowconfigure(0, weight=1)
 
@@ -475,7 +498,7 @@ class MainWindow(tk.Tk):
 
         # 5. Dedicated real-time workflow status/activity panel
         self.activity_panel = ttk.LabelFrame(container, text="Real-Time Status / Activity", padding=10)
-        self.activity_panel.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        self.activity_panel.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         self.activity_panel.columnconfigure(0, weight=3)
         self.activity_panel.columnconfigure(1, weight=2)
 
@@ -550,8 +573,8 @@ class MainWindow(tk.Tk):
         self.activity_log.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
 
         # 6. Action Controls Frame
-        action_frame = ttk.Frame(container)
-        action_frame.grid(row=5, column=0, sticky="ew", pady=(0, 8))
+        action_frame = ttk.Frame(self.recap_page)
+        action_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
 
         self.btn_start = ttk.Button(
             action_frame,
@@ -601,7 +624,7 @@ class MainWindow(tk.Tk):
 
         # 7. Status Bar Frame
         status_bar = ttk.Frame(container, relief="sunken", padding=(8, 6))
-        status_bar.grid(row=6, column=0, sticky="ew")
+        status_bar.grid(row=4, column=0, sticky="ew")
         status_bar.columnconfigure(1, weight=1)
 
         ttk.Label(status_bar, text="Trạng thái:", font=("Segoe UI Semibold", 9)).grid(row=0, column=0, sticky="w", padx=(0, 6))
@@ -618,6 +641,150 @@ class MainWindow(tk.Tk):
         # Offscreen logging & stage label for internal message tracking / testing
         self.lbl_stage = ttk.Label(self, textvariable=self.status_var)
         self.txt_log = tk.Text(self, height=1)
+
+        self._build_highlight_page()
+        self.settings_page = SettingsDialog(
+            parent=self.workspace_host,
+            settings_manager=self.settings_manager,
+            persistence=self.persistence,
+            on_saved=self._on_settings_saved,
+        )
+        self.settings_page.grid(row=0, column=0, sticky="nsew")
+        self.active_modal = None
+        self._show_page("recap")
+
+    def _build_highlight_page(self) -> None:
+        """Build the original-audio Highlight workspace inside the page host."""
+        page = ttk.Frame(self.workspace_host)
+        page.grid(row=0, column=0, sticky="nsew")
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(2, weight=1)
+        self.highlight_page = page
+
+        source_box = ttk.LabelFrame(page, text="Highlight Source", padding=12)
+        source_box.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        bar = ttk.Frame(source_box)
+        bar.pack(fill="x", pady=(0, 5))
+        self.btn_highlight_file = ttk.Button(bar, text="📁 Select Episode", command=self._choose_file)
+        self.btn_highlight_file.pack(side="left", padx=(0, 6))
+        self.btn_highlight_folder = ttk.Button(bar, text="📂 Select Season Folder", command=self._choose_folder)
+        self.btn_highlight_folder.pack(side="left")
+        ttk.Label(source_box, textvariable=self.highlight_source_var, foreground="#0969da").pack(fill="x")
+
+        prompt_box = ttk.LabelFrame(page, text="Highlight Prompt", padding=8)
+        prompt_box.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self.highlight_prompt_text = tk.Text(prompt_box, height=4, wrap="word", font=("Segoe UI", 9))
+        self.highlight_prompt_text.insert("1.0", getattr(self.settings, "highlight_prompt", ""))
+        self.highlight_prompt_text.pack(fill="x")
+
+        queue_box = ttk.LabelFrame(page, text="Highlight Episodes & Publication Queue", padding=8)
+        queue_box.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
+        queue_box.columnconfigure(0, weight=1)
+        queue_box.rowconfigure(0, weight=1)
+        columns = ("episode", "source_video", "stage", "progress", "status")
+        self.highlight_tree = ttk.Treeview(queue_box, columns=columns, show="headings", selectmode="browse")
+        for name, label in zip(columns, ("Episode", "Source Video", "Stage", "Progress", "Status")):
+            self.highlight_tree.heading(name, text=label)
+        self.highlight_tree.column("episode", width=90, anchor="center")
+        self.highlight_tree.column("source_video", width=300)
+        self.highlight_tree.column("stage", width=170, anchor="center")
+        self.highlight_tree.column("progress", width=90, anchor="center")
+        self.highlight_tree.column("status", width=350)
+        scroll = ttk.Scrollbar(queue_box, orient="vertical", command=self.highlight_tree.yview)
+        self.highlight_tree.configure(yscrollcommand=scroll.set)
+        self.highlight_tree.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+
+        actions = ttk.Frame(page)
+        actions.grid(row=3, column=0, sticky="ew")
+        self.btn_start_highlight = ttk.Button(
+            actions, text="▶ Create Highlights", style="Primary.TButton", command=self._on_start_highlight,
+        )
+        self.btn_start_highlight.pack(side="left", padx=(0, 8))
+        ttk.Button(actions, text="Clear Highlight Source", command=self._clear_highlight).pack(side="left")
+        ttk.Label(
+            actions,
+            text="Original video + original audio • no narration • one MP4 and one SRT per highlight",
+            foreground="#475569",
+        ).pack(side="right")
+
+    def _show_page(self, page: str) -> None:
+        pages = {"recap": self.recap_page, "highlight": self.highlight_page, "settings": self.settings_page}
+        target = pages.get(page)
+        if target is None:
+            return
+        self.current_page = page
+        target.tkraise()
+        for name, button in self.page_buttons.items():
+            button.configure(state="disabled" if name == page else "normal")
+
+    def _on_settings_saved(self, new_settings: AppSettings) -> None:
+        current_highlight = self.highlight_prompt_text.get("1.0", "end-1c") if hasattr(self, "highlight_prompt_text") else ""
+        if not current_highlight.strip() or current_highlight == getattr(self.settings, "highlight_prompt", ""):
+            self.highlight_prompt_text.delete("1.0", tk.END)
+            self.highlight_prompt_text.insert("1.0", new_settings.highlight_prompt)
+        self.settings = new_settings
+        self.banner.show("Đã lưu cài đặt thành công!", level="success")
+        self._log("Cài đặt hệ thống đã được cập nhật.")
+
+    def _refresh_highlight_table(self) -> None:
+        for item in self.highlight_tree.get_children():
+            self.highlight_tree.delete(item)
+        for index, source in enumerate(self.highlight_sources, 1):
+            self.highlight_tree.insert("", "end", iid=f"hl_ep_{index}", values=(index, source.basename, "Ready", "0%", "Ready"))
+        if self.highlight_sources:
+            label = "Episode" if len(self.highlight_sources) == 1 else "Season"
+            self.highlight_source_var.set(f"{label}: {len(self.highlight_sources)} source file(s)")
+
+    def _clear_highlight(self) -> None:
+        if self.worker.is_running or self.discovery_worker.is_running:
+            return
+        self.highlight_sources.clear()
+        self._refresh_highlight_table()
+        self.highlight_source_var.set("No highlight source selected.")
+
+    def _on_start_highlight(self) -> None:
+        """Start the distinct Highlight workflow; never enters Recap narration."""
+        if self.worker.is_running or self.discovery_worker.is_running:
+            self.banner.show("A workflow is already active.", level="warning")
+            return
+        if not self.highlight_sources:
+            self.banner.show("Select an episode or season folder for Highlight Mode.", level="warning")
+            return
+        prompt = self.highlight_prompt_text.get("1.0", "end-1c").strip()
+        if not prompt:
+            self.banner.show("Highlight Prompt cannot be empty.", level="warning")
+            return
+        selected_paths = {str(Path(source.path).resolve()).casefold() for source in self.highlight_sources}
+        for project in self.persistence.list_projects():
+            if project.get("project_mode", "RECAP") != "HIGHLIGHT" or project.get("status") == ProjectStatus.COMPLETED.value:
+                continue
+            saved_paths = {
+                str(Path(item.get("fingerprint", {}).get("path", "")).resolve()).casefold()
+                for item in project.get("sources", []) if item.get("fingerprint", {}).get("path")
+            }
+            if saved_paths == selected_paths:
+                self._check_restart_projects(select_project_id=project["project_id"])
+                self.banner.show("This Highlight source already has an unfinished project. Use Resume.", level="warning")
+                return
+        self.settings = self.settings_manager.load()
+        self.settings.highlight_prompt = prompt
+        self.settings_manager.save(self.settings)
+        now_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        first = Path(self.highlight_sources[0].path)
+        base = first.stem if len(self.highlight_sources) == 1 else (first.parent.name or "season")
+        clean = "".join(c if c.isalnum() or c in "._-" else "_" for c in base)[:24]
+        project_id = f"highlight_{clean}_{now_str}"
+        self.current_project_id = project_id
+        self.current_project_name = base
+        self.worker.start_highlight_project(
+            project_id=project_id,
+            project_name=base,
+            source_input=[source.path for source in self.highlight_sources],
+            prompt=prompt,
+            settings=self.settings,
+        )
+        self._set_running_state(True)
 
     # -------------------------------------------------------------------------
     # GPU and Updater Background Checks
@@ -673,6 +840,7 @@ class MainWindow(tk.Tk):
             filetypes=filetypes,
         )
         if chosen:
+            self._discovery_mode = "highlight" if self.current_page == "highlight" else "recap"
             self._load_file(Path(chosen))
 
     def _choose_folder(self) -> None:
@@ -683,6 +851,7 @@ class MainWindow(tk.Tk):
             title="Chọn thư mục chứa video",
         )
         if chosen:
+            self._discovery_mode = "highlight" if self.current_page == "highlight" else "recap"
             self._load_folder(Path(chosen))
 
     def _load_file(self, path: Path) -> None:
@@ -771,6 +940,8 @@ class MainWindow(tk.Tk):
 
         selected_paths = {str(Path(source.path).resolve()).casefold() for source in self.discovered_sources}
         for project in self.persistence.list_projects():
+            if project.get("project_mode", "RECAP") != "RECAP":
+                continue
             if project.get("status") not in {status.value for status in ProjectStatus if status != ProjectStatus.COMPLETED}:
                 continue
             saved_paths = {
@@ -945,54 +1116,16 @@ class MainWindow(tk.Tk):
         self._open_output_folder()
 
     def _on_open_settings(self, initial_tab: Optional[int | str] = None) -> None:
-        existing = self.active_modal
-        if existing is not None:
-            try:
-                if existing.winfo_exists() and hasattr(existing, "activate") and existing.activate():
-                    return
-            except tk.TclError:
-                pass
-            self.active_modal = None
-
-        def _on_saved(new_settings: AppSettings) -> None:
-            self.settings = new_settings
-            self.banner.show("Đã lưu cài đặt thành công!", level="success")
-            self._log("Cài đặt hệ thống đã được cập nhật.")
-
-        def _on_closed(dialog: tk.Toplevel) -> None:
-            if self.active_modal is dialog:
-                self.active_modal = None
-            if not self._shutting_down and not self._is_closed:
-                try:
-                    self.deiconify()
-                    self.lift()
-                    self.focus_set()
-                except tk.TclError:
-                    pass
-
-        dialog = SettingsDialog(
-            parent=self,
-            settings_manager=self.settings_manager,
-            persistence=self.persistence,
-            on_saved=_on_saved,
-            initial_tab=initial_tab,
-            on_closed=_on_closed,
-        )
-        self.active_modal = dialog
+        if self.settings_page is None:
+            return
+        if initial_tab is not None:
+            self.settings_page._select_tab(initial_tab)
+        self._show_page("settings")
 
     def _on_window_activated(self, _event: Any = None) -> None:
-        """Recover the active owned modal only when Windows activates this app."""
+        """Restore the one main application window when Windows activates it."""
         if self._shutting_down or self._is_closed:
             return
-        modal = self.active_modal
-        if modal is not None:
-            try:
-                if modal.winfo_exists() and hasattr(modal, "activate"):
-                    modal.activate()
-                    return
-            except tk.TclError:
-                pass
-            self.active_modal = None
         try:
             if self.state() in ("withdrawn", "iconic"):
                 self.deiconify()
@@ -1013,18 +1146,28 @@ class MainWindow(tk.Tk):
         project_id = project["project_id"]
         self.current_project_id = project_id
         self.current_project_name = project.get("project_name") or project_id
+        mode = project.get("project_mode", "RECAP")
         self.discovered_sources.clear()
+        self.highlight_sources.clear()
         self._output_paths.clear()
         for item in self.tree.get_children():
             self.tree.delete(item)
         sources = project.get("sources", [])
+        target_tree = self.highlight_tree if mode == "HIGHLIGHT" else self.tree
+        for item in target_tree.get_children():
+            target_tree.delete(item)
         for index, source in enumerate(sources, start=1):
             source_name = source.get("source_file", "") if isinstance(source, dict) else ""
-            self.tree.insert(
+            target_tree.insert(
                 "", "end", iid=f"saved_ep_{index}",
                 values=(str(index), source_name, project.get("status", ""), "", "Đã lưu"),
             )
-        self.source_var.set(f"Dự án đã lưu: {self.current_project_name} ({len(sources)} video)")
+        if mode == "HIGHLIGHT":
+            self.highlight_source_var.set(f"Saved Highlight project: {self.current_project_name} ({len(sources)} video)")
+            self._show_page("highlight")
+        else:
+            self.source_var.set(f"Dự án đã lưu: {self.current_project_name} ({len(sources)} video)")
+            self._show_page("recap")
         self.status_var.set(f"Có thể tiếp tục dự án '{self.current_project_name}' từ checkpoint đã lưu.")
         self.btn_resume.config(state="normal")
         self._load_persisted_activity_async(project_id)
@@ -1273,11 +1416,24 @@ class MainWindow(tk.Tk):
             "voice": "Voice", "narration_fit": "Narration Fit", "audio_mix": "Audio", "render": "Render", "publish": "Publish",
         }
         symbols = {"complete": "✓", "active": "●", "pending": "○", "retry": "↻", "skipped": "—", "failed": "!"}
-        pipeline = snapshot.get("pipeline") if isinstance(snapshot.get("pipeline"), dict) else {}
-        self.pipeline_var.set("  →  ".join(
-            f"{symbols.get(str(pipeline.get(stage, 'pending')), '○')} {short_labels[stage]}"
-            for stage in PIPELINE_STAGES
-        ))
+        if snapshot.get("pipeline_mode") == "HIGHLIGHT":
+            highlight_stages = (
+                "Preparing Sources", "Scanning Evidence", "Building Highlight Coverage",
+                "Planning Highlight Scenes", "Validating Highlights", "Building Highlight JSON",
+                "Rendering Highlights", "Building Original Dialogue SRT", "Publishing",
+            )
+            current = str(snapshot.get("stage_label") or snapshot.get("stage") or "")
+            current_index = highlight_stages.index(current) if current in highlight_stages else -1
+            self.pipeline_var.set("  →  ".join(
+                f"{'✓' if index < current_index else '●' if index == current_index else '○'} {label}"
+                for index, label in enumerate(highlight_stages)
+            ))
+        else:
+            pipeline = snapshot.get("pipeline") if isinstance(snapshot.get("pipeline"), dict) else {}
+            self.pipeline_var.set("  →  ".join(
+                f"{symbols.get(str(pipeline.get(stage, 'pending')), '○')} {short_labels[stage]}"
+                for stage in PIPELINE_STAGES
+            ))
 
         summary: list[str] = []
         if snapshot.get("analysis_seconds") is not None:
@@ -1433,6 +1589,19 @@ class MainWindow(tk.Tk):
             p_name = data.get("name", "")
             d_kind = data.get("kind", "")
 
+            if self._discovery_mode == "highlight":
+                if not fps:
+                    self.highlight_sources.clear()
+                    self._refresh_highlight_table()
+                    self.highlight_source_var.set(f"{p_name}: no supported videos")
+                    self.banner.show("No supported highlight source was found.", level="warning")
+                    return
+                self.highlight_sources = list(fps)
+                self._refresh_highlight_table()
+                self.status_var.set(f"Highlight source ready: {p_name} ({len(fps)} episode(s)).")
+                self.banner.show("Highlight source is ready.", level="success")
+                return
+
             if d_kind == "file":
                 if not fps:
                     self.banner.show(f"File video không tồn tại: {p_name}", level="warning")
@@ -1477,15 +1646,21 @@ class MainWindow(tk.Tk):
 
         elif kind == "finished":
             status = data.get("status") if isinstance(data, dict) else ""
+            finished_mode = data.get("mode", "RECAP") if isinstance(data, dict) else "RECAP"
             self._set_running_state(False)
 
             hwnd = self.winfo_id() if self.settings.flash_taskbar else None
             proj_name = self.current_project_name or "Dự án"
 
             if status == ProjectStatus.COMPLETED.value:
-                msg = f"Đã hoàn thành toàn bộ dự án video recap thành công!"
+                msg = "Highlight publication completed!" if finished_mode == "HIGHLIGHT" else "Đã hoàn thành toàn bộ dự án video recap thành công!"
                 self.status_var.set(msg)
                 self.banner.show(f"Đã hoàn thành toàn bộ dự án '{proj_name}' thành công!", level="success")
+                if finished_mode == "HIGHLIGHT":
+                    for item in self.highlight_tree.get_children():
+                        self.highlight_tree.set(item, "stage", "Published")
+                        self.highlight_tree.set(item, "progress", "100%")
+                        self.highlight_tree.set(item, "status", "Complete")
                 if self.settings.notify_complete:
                     self.notification_service.notify_project_completed(
                         project_name=proj_name,
@@ -1557,6 +1732,9 @@ class MainWindow(tk.Tk):
             self.btn_select_file.config(state="disabled")
             self.btn_select_folder.config(state="disabled")
             self.btn_clear.config(state="disabled")
+            self.btn_start_highlight.config(state="disabled")
+            self.btn_highlight_file.config(state="disabled")
+            self.btn_highlight_folder.config(state="disabled")
         else:
             self.btn_start.config(state="normal")
             self.btn_stop.config(state="disabled")
@@ -1565,6 +1743,9 @@ class MainWindow(tk.Tk):
             self.btn_select_file.config(state="normal")
             self.btn_select_folder.config(state="normal")
             self.btn_clear.config(state="normal")
+            self.btn_start_highlight.config(state="normal")
+            self.btn_highlight_file.config(state="normal")
+            self.btn_highlight_folder.config(state="normal")
 
     def _log(self, message: str) -> None:
         now_str = datetime.now().strftime("%H:%M:%S")
@@ -1624,15 +1805,6 @@ class MainWindow(tk.Tk):
         self._is_closed = True
 
         self.cancel_owned_after()
-
-        modal = self.active_modal
-        self.active_modal = None
-        if modal is not None:
-            try:
-                if modal.winfo_exists():
-                    modal.destroy()
-            except tk.TclError:
-                pass
 
         if hasattr(self, "discovery_worker") and self.discovery_worker.is_running:
             self.discovery_worker.cancel()

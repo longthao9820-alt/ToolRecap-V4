@@ -388,6 +388,54 @@ class WorkflowWorker:
         self._thread = threading.Thread(target=_worker_target, daemon=True, name="WorkflowWorkerThread")
         self._thread.start()
 
+    def start_highlight_project(
+        self,
+        project_id: str,
+        project_name: str,
+        source_input: Union[str, Path, Sequence[Union[str, Path]]],
+        prompt: str,
+        output_dir: Optional[Union[str, Path]] = None,
+        settings: Optional[AppSettings] = None,
+    ) -> None:
+        """Run the distinct original-audio Highlight pipeline in the worker."""
+        with self._lock:
+            if self._is_running:
+                raise RuntimeError("A workflow is already active.")
+            self._is_running = True
+            self._active_project_id = project_id
+            token = CancellationToken()
+            self._cancellation_token = token
+        cfg = settings or self.settings_manager.load()
+
+        def _target() -> None:
+            try:
+                from toolrecap_v4.highlight import HighlightWorkflow
+                store = DPAPISecretStore(storage_root=self.persistence.root)
+                gateway = GatewayClient(base_url=cfg.gateway_endpoint, api_key=store.get_secret("gateway_api_key"))
+                workflow = HighlightWorkflow(
+                    persistence=self.persistence, gateway_client=gateway, settings_manager=self.settings_manager,
+                    progress_callback=lambda payload: self._put_message("activity_patch", {"project_id": project_id, **payload}),
+                )
+                workflow.create_project(
+                    project_id=project_id, project_name=project_name, source_input=source_input,
+                    prompt=prompt, settings=cfg, output_dir=output_dir, cancellation_token=token,
+                )
+                final_state = workflow.run(project_id, settings=cfg, cancellation_token=token)
+                self._put_message("finished", {"status": ProjectStatus.COMPLETED.value, "project": final_state, "mode": "HIGHLIGHT"})
+            except CancelledError:
+                self._put_message("finished", {"status": ProjectStatus.CANCELLED.value, "project_id": project_id, "mode": "HIGHLIGHT"})
+            except Exception as exc:
+                clean = format_clean_error(exc)
+                self._put_message("error", {"message": clean})
+                self._put_message("finished", {"status": ProjectStatus.FAILED.value, "project_id": project_id, "error": clean, "mode": "HIGHLIGHT"})
+            finally:
+                with self._lock:
+                    self._is_running = False
+                    self._active_project_id = None
+
+        self._thread = threading.Thread(target=_target, daemon=True, name="HighlightWorkflowWorker")
+        self._thread.start()
+
     def resume_project(
         self,
         project_id: str,
@@ -413,18 +461,29 @@ class WorkflowWorker:
                     "session_elapsed_seconds": 0.0,
                 })
                 self._put_message("log", f"Tiếp tục thực hiện dự án '{project_id}'...")
-                wf = self._create_workflow(cfg)
-                callbacks = self._build_callbacks()
+                saved_state = self.persistence.load_project(project_id)
+                resume_mode = saved_state.get("project_mode", "RECAP")
+                if saved_state.get("project_mode", "RECAP") == "HIGHLIGHT":
+                    from toolrecap_v4.highlight import HighlightWorkflow
+                    store = DPAPISecretStore(storage_root=self.persistence.root)
+                    gateway = GatewayClient(base_url=cfg.gateway_endpoint, api_key=store.get_secret("gateway_api_key"))
+                    workflow = HighlightWorkflow(
+                        persistence=self.persistence, gateway_client=gateway, settings_manager=self.settings_manager,
+                        progress_callback=lambda payload: self._put_message("activity_patch", {"project_id": project_id, **payload}),
+                    )
+                    final_state = workflow.run(project_id, settings=cfg, cancellation_token=token)
+                else:
+                    wf = self._create_workflow(cfg)
+                    callbacks = self._build_callbacks()
+                    final_state = wf.resume_project(
+                        project_id=project_id,
+                        output_dir=output_dir,
+                        settings=cfg,
+                        cancellation_token=token,
+                        callbacks=callbacks,
+                    )
 
-                final_state = wf.resume_project(
-                    project_id=project_id,
-                    output_dir=output_dir,
-                    settings=cfg,
-                    cancellation_token=token,
-                    callbacks=callbacks,
-                )
-
-                self._put_message("finished", {"status": ProjectStatus.COMPLETED.value, "project": final_state})
+                self._put_message("finished", {"status": ProjectStatus.COMPLETED.value, "project": final_state, "mode": resume_mode})
                 self._put_message("log", f"Dự án '{project_id}' đã hoàn tất thành công!")
 
             except CancelledError:

@@ -73,7 +73,7 @@ def test_recap_inert_dropdowns_removed_and_variables_preserved(tmp_path: Path):
         assert dialog.txt_prompt is not None
 
         # 4. V2 sidebar layout preserved
-        assert set(dialog._panes.keys()) == {"Recap", "AI Gateway", "Voice", "Render and Output"}
+        assert set(dialog._panes.keys()) == {"Recap", "Highlight", "AI Gateway", "Voice", "Render and Output"}
         assert dialog._current_pane == "Recap"
 
         dialog.destroy()

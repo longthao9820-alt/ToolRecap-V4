@@ -124,7 +124,9 @@ def test_dialog_save_error_redacts_form_secret(tmp_path):
         original_endpoint=dialog.settings.gateway_endpoint;dialog.var_gw_endpoint.set("https://new.example")
         dialog.gateway_controller.save=lambda *a,**k:(_ for _ in ()).throw(RuntimeError("failed with save-secret-xyz"))
         with patch("toolrecap_v4.ui.settings_dialog.messagebox.showerror") as shown:dialog._on_save()
-        assert shown.called and "save-secret-xyz" not in shown.call_args.args[1] and "[REDACTED]" in shown.call_args.args[1]
+        assert not shown.called
+        inline=dialog.lbl_status.cget("text")
+        assert "save-secret-xyz" not in inline and "[REDACTED]" in inline
         assert dialog.settings.gateway_endpoint==original_endpoint
         dialog.destroy()
     finally:app.destroy()

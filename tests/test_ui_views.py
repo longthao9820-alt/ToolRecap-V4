@@ -285,22 +285,22 @@ def test_settings_dialog_masked_secrets_and_validation(tmp_path: Path):
         assert dialog._had_gw_key is True
 
         # Check tabs count
-        assert dialog.notebook.index("end") == 7
+        assert dialog.notebook.index("end") == 8
 
         # Invalid URL validation
         dialog.var_gw_endpoint.set("invalid://not-http")
         with patch("toolrecap_v4.ui.settings_dialog.messagebox.showerror") as mock_err:
             dialog._on_save()
-            mock_err.assert_called_once()
-            assert "bắt đầu bằng" in mock_err.call_args[0][1]
+            mock_err.assert_not_called()
+            assert "bắt đầu bằng" in dialog.lbl_status.cget("text")
 
         # Fix URL and set invalid FPS
         dialog.var_gw_endpoint.set("http://localhost:8000")
         dialog.var_canvas_fps.set(0)
         with patch("toolrecap_v4.ui.settings_dialog.messagebox.showerror") as mock_err:
             dialog._on_save()
-            mock_err.assert_called_once()
-            assert "FPS" in mock_err.call_args[0][1]
+            mock_err.assert_not_called()
+            assert "FPS" in dialog.lbl_status.cget("text")
 
         # Verify canvas auto label is present and width/height entry widgets removed
         assert hasattr(dialog, "lbl_canvas_auto")
@@ -367,17 +367,14 @@ def test_settings_dialog_initial_tab_and_prompt_reset(tmp_path: Path):
         app.destroy()
 
 
-def test_main_window_check_update_opens_settings_update_tab(tmp_path: Path):
-    """Verify MainWindow._on_check_update delegates to SettingsDialog with initial_tab='update'."""
+def test_main_window_check_update_shows_embedded_settings_update_tab(tmp_path: Path):
     persistence = ProjectPersistence(storage_root=tmp_path)
     app = MainWindow(persistence=persistence)
     try:
         app.update_idletasks()
-        with patch("toolrecap_v4.ui.main_window.SettingsDialog") as mock_dialog:
-            app._on_check_update()
-            mock_dialog.assert_called_once()
-            call_kwargs = mock_dialog.call_args[1]
-            assert call_kwargs.get("initial_tab") == "update"
+        app._on_check_update()
+        assert app.current_page == "settings"
+        assert app.settings_page.notebook.index(app.settings_page.notebook.select()) == 6
     finally:
         app.destroy()
 
@@ -401,10 +398,7 @@ def test_first_launch_no_automatic_import(tmp_path: Path):
     assert not settings_file.exists()
 
 
-def test_settings_dialog_v2_visual_sidebar_layout(tmp_path: Path):
-    """Verify SettingsDialog has exactly four sidebar panes matching V2 visual layout:
-    Recap, AI Gateway, Voice, Render and Output with minsize 840x600 and geometry 920x680.
-    """
+def test_embedded_settings_sidebar_layout(tmp_path: Path):
     persistence = ProjectPersistence(storage_root=tmp_path)
     app = MainWindow(persistence=persistence)
     try:
@@ -412,13 +406,11 @@ def test_settings_dialog_v2_visual_sidebar_layout(tmp_path: Path):
         dialog = SettingsDialog(app, persistence=persistence)
         dialog.update_idletasks()
 
-        # Exactly 4 sidebar panes
-        assert set(dialog._panes.keys()) == {"Recap", "AI Gateway", "Voice", "Render and Output"}
-        assert set(dialog._nav_buttons.keys()) == {"Recap", "AI Gateway", "Voice", "Render and Output"}
-
-        # Geometry & minsize
-        assert dialog.minsize() == (840, 600)
-        assert "920x680" in dialog.geometry()
+        expected = {"Recap", "Highlight", "AI Gateway", "Voice", "Render and Output"}
+        assert set(dialog._panes.keys()) == expected
+        assert set(dialog._nav_buttons.keys()) == expected
+        assert dialog.winfo_toplevel() is app
+        assert hasattr(dialog, "settings_canvas")
 
         # Active pane starts at Recap
         assert dialog._current_pane == "Recap"

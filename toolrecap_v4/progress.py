@@ -514,6 +514,42 @@ def reconstruct_project_progress(
     This runs only when a saved project is selected, never on the one-second UI tick.
     """
     state = persistence.load_project(project_id)
+    if state.get("project_mode", "RECAP") == "HIGHLIGHT":
+        try:
+            highlight_final = persistence.load_checkpoint(project_id, "highlight_final")
+        except Exception:
+            highlight_final = None
+        prepared_count = len(persistence.list_prepared_episodes(project_id))
+        source_count = len(state.get("sources", []))
+        status = str(state.get("status", ""))
+        if status == "completed":
+            stage_label, activity = "Publishing", "Saved Highlight project is complete."
+            activity_state = ActivityState.COMPLETE.value
+        elif highlight_final and highlight_final.get("status") == "COMPLETE":
+            stage_label, activity = "Rendering Highlights", "Validated Highlight plan is ready to resume publication."
+            activity_state = ActivityState.IDLE.value
+        elif prepared_count and prepared_count >= source_count:
+            stage_label, activity = "Scanning Evidence", "Prepared Highlight sources will be reused on resume."
+            activity_state = ActivityState.IDLE.value
+        else:
+            stage_label, activity = "Preparing Sources", "Saved Highlight project is ready to continue."
+            activity_state = ActivityState.IDLE.value
+        if status == "failed":
+            activity_state, activity = ActivityState.FAILED.value, "Saved Highlight failure; valid checkpoints are preserved."
+        elif status == "cancelled":
+            activity_state = ActivityState.CANCELLED.value
+        return {
+            "schema_version": PROGRESS_SCHEMA_VERSION, "project_id": project_id,
+            "pipeline_mode": "HIGHLIGHT", "state": activity_state, "stage": stage_label,
+            "stage_label": stage_label, "activity_text": activity, "active": False,
+            "completed": prepared_count if stage_label == "Preparing Sources" else None,
+            "total": source_count if stage_label == "Preparing Sources" else None,
+            "percent": (prepared_count * 100.0 / source_count if source_count and stage_label == "Preparing Sources" else None),
+            "unit": "episodes", "session_elapsed_seconds": 0.0, "project_elapsed_seconds": None,
+            "stage_elapsed_seconds": 0.0, "estimated_remaining_seconds": None,
+            "recent_activity": [], "last_activity_at": None, "reconstructed": True,
+            "error": state.get("error") if status == "failed" else None,
+        }
     if persistence.has_operational_status(project_id):
         try:
             snapshot = persistence.load_operational_status(project_id)

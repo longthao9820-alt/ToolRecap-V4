@@ -124,7 +124,7 @@ class GatewaySettingsController:
 
 @dataclass
 class AppSettings:
-    settings_schema_version: int = 11
+    settings_schema_version: int = 12
     # Audio mix
     original_audio_db: float = 0.0
     commentary_audio_db: float = 0.0
@@ -213,6 +213,7 @@ class AppSettings:
 
     # Prompt
     prompt: str = ""
+    highlight_prompt: str = ""
 
     # Recap metadata (V2 compatible)
     recap_language: str = "en-US"
