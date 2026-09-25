@@ -72,6 +72,7 @@ from toolrecap_v4.persistence import ProjectPersistence, read_json
 from toolrecap_v4.settings import AppSettings, SettingsManager
 from toolrecap_v4.ui.notifications import WindowsNotificationService
 from toolrecap_v4.ui.settings_dialog import SettingsDialog
+from toolrecap_v4.ui.workspace import WorkspaceLabels, WorkspacePage
 from toolrecap_v4.ui.worker import SourceDiscoveryWorker, WorkerMessage, WorkflowWorker
 from toolrecap_v4.workflow import OutputStatus, ProjectStatus
 from toolrecap_v4.progress import (
@@ -331,6 +332,8 @@ class MainWindow(tk.Tk):
         self.current_project_id: Optional[str] = None
         self.current_project_name: Optional[str] = None
         self._resume_project_ids: Dict[str, str] = {}
+        self._highlight_resume_project_ids: Dict[str, str] = {}
+        self._current_project_by_mode: Dict[str, Optional[str]] = {"RECAP": None, "HIGHLIGHT": None}
         self._output_paths: Dict[str, str] = {}
 
         # Tkinter variables matching V2
@@ -433,68 +436,52 @@ class MainWindow(tk.Tk):
         self.workspace_host.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
         self.workspace_host.columnconfigure(0, weight=1)
         self.workspace_host.rowconfigure(0, weight=1)
-        self.recap_page = ttk.Frame(self.workspace_host)
+        self.recap_page = WorkspacePage(
+            self.workspace_host,
+            labels=WorkspaceLabels(
+                "Source", "📁 Select File", "📂 Select Folder", "Unfinished Project:",
+                "⏯ Resume Saved Project", "Recap Prompt", "Episodes & Output Queue",
+                "▶ Start Creating Recap Videos", "Clear",
+            ),
+            source_variable=self.source_var, prompt=self.settings.prompt,
+            on_select_file=lambda: self._choose_file_for_mode("recap"),
+            on_select_folder=lambda: self._choose_folder_for_mode("recap"),
+            on_saved_selected=self._on_select_resume_project,
+            on_resume_saved=lambda: self._on_resume_detected_project("RECAP"),
+            on_start=self._on_start_project, on_stop=self._on_stop_project,
+            on_open_output=self._open_output_folder, on_resume=self._on_resume_current,
+            on_clear=self._clear_queue, on_use_json=self._on_render_existing_json,
+        )
         self.recap_page.grid(row=0, column=0, sticky="nsew")
-        self.recap_page.columnconfigure(0, weight=1)
-        self.recap_page.rowconfigure(1, weight=1)
-
-        # Recap workspace
-        source_box = ttk.LabelFrame(self.recap_page, text="Movie Source", padding=12)
-        source_box.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        source_box.columnconfigure(0, weight=1)
-
-        src_btn_bar = ttk.Frame(source_box)
-        src_btn_bar.pack(fill="x", pady=(0, 6))
-        self.btn_select_file = ttk.Button(src_btn_bar, text="📁 Select File", command=self._choose_file)
-        self.btn_select_file.pack(side="left", padx=(0, 6))
-        self.btn_select_folder = ttk.Button(src_btn_bar, text="📂 Select Folder", command=self._choose_folder)
-        self.btn_select_folder.pack(side="left")
-
-        self.lbl_source = ttk.Label(
-            source_box,
-            textvariable=self.source_var,
-            font=("Segoe UI", 9),
-            foreground="#0969da",
-            wraplength=900,
+        self.highlight_page = WorkspacePage(
+            self.workspace_host,
+            labels=WorkspaceLabels(
+                "Highlight Source", "📁 Select Episode", "📂 Select Season Folder",
+                "Unfinished Highlight Project:", "⏯ Resume Saved Project", "Highlight Prompt",
+                "Episodes & Output Queue", "▶ Create Highlights", "Clear Highlight Source",
+            ),
+            source_variable=self.highlight_source_var, prompt=self.settings.highlight_prompt,
+            on_select_file=lambda: self._choose_file_for_mode("highlight"),
+            on_select_folder=lambda: self._choose_folder_for_mode("highlight"),
+            on_saved_selected=self._on_select_highlight_resume_project,
+            on_resume_saved=lambda: self._on_resume_detected_project("HIGHLIGHT"),
+            on_start=self._on_start_highlight, on_stop=self._on_stop_project,
+            on_open_output=self._open_output_folder, on_resume=lambda: self._on_resume_current("HIGHLIGHT"),
+            on_clear=self._clear_highlight,
         )
-        self.lbl_source.pack(fill="x")
+        self.highlight_page.grid(row=0, column=0, sticky="nsew")
 
-        # Restored projects must remain visible after a fresh application start.
-        self.resume_banner = ttk.Frame(source_box)
-        ttk.Label(self.resume_banner, text="Dự án chưa hoàn thành:").pack(side="left", padx=(0, 8))
-        self.cmb_resume_projects = ttk.Combobox(self.resume_banner, state="readonly", width=54)
-        self.cmb_resume_projects.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self.cmb_resume_projects.bind("<<ComboboxSelected>>", self._on_select_resume_project)
-        self.btn_resume_saved = ttk.Button(
-            self.resume_banner, text="⏯ Tiếp tục dự án đã lưu", command=self._on_resume_detected_project,
-        )
-        self.btn_resume_saved.pack(side="left")
-
-        # 4. Source Episodes & Queue Table Frame (5 columns)
-        queue_frame = ttk.LabelFrame(self.recap_page, text="Source Episodes & Output Queue", padding=8)
-        queue_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
-        queue_frame.columnconfigure(0, weight=1)
-        queue_frame.rowconfigure(0, weight=1)
-
-        columns = ("episode", "source_video", "stage", "progress", "status")
-        self.tree = ttk.Treeview(queue_frame, columns=columns, show="headings", selectmode="browse")
-        self.tree.heading("episode", text="Episode")
-        self.tree.heading("source_video", text="Source Video")
-        self.tree.heading("stage", text="Stage")
-        self.tree.heading("progress", text="Progress")
-        self.tree.heading("status", text="Status")
-
-        self.tree.column("episode", width=90, anchor="center")
-        self.tree.column("source_video", width=260, anchor="w")
-        self.tree.column("stage", width=150, anchor="center")
-        self.tree.column("progress", width=90, anchor="center")
-        self.tree.column("status", width=420, anchor="w")
-
-        scroll = ttk.Scrollbar(queue_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        scroll.grid(row=0, column=1, sticky="ns")
-        self.tree.bind("<Double-1>", self._on_double_click_tree)
+        # Compatibility aliases for established tests and handlers.
+        self.tree = self.recap_page.tree
+        self.highlight_tree = self.highlight_page.tree
+        self.btn_select_file = self.recap_page.select_file_button
+        self.btn_select_folder = self.recap_page.select_folder_button
+        self.lbl_source = self.recap_page.source_label
+        self.resume_banner = self.recap_page.saved_panel
+        self.cmb_resume_projects = self.recap_page.saved_combo
+        self.btn_resume_saved = self.recap_page.resume_saved_button
+        self.recap_prompt_text = self.recap_page.prompt_text
+        self.highlight_prompt_text = self.highlight_page.prompt_text
 
         # 5. Dedicated real-time workflow status/activity panel
         self.activity_panel = ttk.LabelFrame(container, text="Real-Time Status / Activity", padding=10)
@@ -572,55 +559,18 @@ class MainWindow(tk.Tk):
         )
         self.activity_log.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
 
-        # 6. Action Controls Frame
-        action_frame = ttk.Frame(self.recap_page)
-        action_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-
-        self.btn_start = ttk.Button(
-            action_frame,
-            text="▶ Start Creating Recap Videos",
-            style="Primary.TButton",
-            command=self._on_start_project,
-        )
-        self.btn_start.pack(side="left", padx=(0, 8))
-
-        self.btn_stop = ttk.Button(
-            action_frame,
-            text="⏹ Stop",
-            style="Danger.TButton",
-            command=self._on_stop_project,
-            state="disabled",
-        )
-        self.btn_stop.pack(side="left", padx=(0, 8))
-
-        self.btn_open_out = ttk.Button(
-            action_frame,
-            text="📂 Open Output Folder",
-            command=self._open_output_folder,
-        )
-        self.btn_open_out.pack(side="left", padx=(0, 8))
-
-        self.btn_resume = ttk.Button(
-            action_frame,
-            text="⏯ Tiếp tục",
-            command=self._on_resume_current,
-            state="disabled",
-        )
-        self.btn_resume.pack(side="left", padx=(0, 8))
-
-        self.btn_render_json = ttk.Button(
-            action_frame,
-            text="📄 Dựng từ JSON (0 AI)",
-            command=self._on_render_existing_json,
-        )
-        self.btn_render_json.pack(side="left", padx=(0, 8))
-
-        self.btn_clear = ttk.Button(
-            action_frame,
-            text="Xóa danh sách",
-            command=self._clear_queue,
-        )
-        self.btn_clear.pack(side="right")
+        self.btn_start = self.recap_page.start_button
+        self.btn_stop = self.recap_page.stop_button
+        self.btn_open_out = self.recap_page.open_output_button
+        self.btn_resume = self.recap_page.resume_button
+        self.btn_render_json = self.recap_page.use_json_button
+        self.btn_clear = self.recap_page.clear_button
+        self.btn_start_highlight = self.highlight_page.start_button
+        self.btn_stop_highlight = self.highlight_page.stop_button
+        self.btn_open_highlight_out = self.highlight_page.open_output_button
+        self.btn_resume_highlight = self.highlight_page.resume_button
+        self.btn_highlight_file = self.highlight_page.select_file_button
+        self.btn_highlight_folder = self.highlight_page.select_folder_button
 
         # 7. Status Bar Frame
         status_bar = ttk.Frame(container, relief="sunken", padding=(8, 6))
@@ -642,7 +592,6 @@ class MainWindow(tk.Tk):
         self.lbl_stage = ttk.Label(self, textvariable=self.status_var)
         self.txt_log = tk.Text(self, height=1)
 
-        self._build_highlight_page()
         self.settings_page = SettingsDialog(
             parent=self.workspace_host,
             settings_manager=self.settings_manager,
@@ -654,59 +603,8 @@ class MainWindow(tk.Tk):
         self._show_page("recap")
 
     def _build_highlight_page(self) -> None:
-        """Build the original-audio Highlight workspace inside the page host."""
-        page = ttk.Frame(self.workspace_host)
-        page.grid(row=0, column=0, sticky="nsew")
-        page.columnconfigure(0, weight=1)
-        page.rowconfigure(2, weight=1)
-        self.highlight_page = page
-
-        source_box = ttk.LabelFrame(page, text="Highlight Source", padding=12)
-        source_box.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        bar = ttk.Frame(source_box)
-        bar.pack(fill="x", pady=(0, 5))
-        self.btn_highlight_file = ttk.Button(bar, text="📁 Select Episode", command=self._choose_file)
-        self.btn_highlight_file.pack(side="left", padx=(0, 6))
-        self.btn_highlight_folder = ttk.Button(bar, text="📂 Select Season Folder", command=self._choose_folder)
-        self.btn_highlight_folder.pack(side="left")
-        ttk.Label(source_box, textvariable=self.highlight_source_var, foreground="#0969da").pack(fill="x")
-
-        prompt_box = ttk.LabelFrame(page, text="Highlight Prompt", padding=8)
-        prompt_box.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        self.highlight_prompt_text = tk.Text(prompt_box, height=4, wrap="word", font=("Segoe UI", 9))
-        self.highlight_prompt_text.insert("1.0", getattr(self.settings, "highlight_prompt", ""))
-        self.highlight_prompt_text.pack(fill="x")
-
-        queue_box = ttk.LabelFrame(page, text="Highlight Episodes & Publication Queue", padding=8)
-        queue_box.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
-        queue_box.columnconfigure(0, weight=1)
-        queue_box.rowconfigure(0, weight=1)
-        columns = ("episode", "source_video", "stage", "progress", "status")
-        self.highlight_tree = ttk.Treeview(queue_box, columns=columns, show="headings", selectmode="browse")
-        for name, label in zip(columns, ("Episode", "Source Video", "Stage", "Progress", "Status")):
-            self.highlight_tree.heading(name, text=label)
-        self.highlight_tree.column("episode", width=90, anchor="center")
-        self.highlight_tree.column("source_video", width=300)
-        self.highlight_tree.column("stage", width=170, anchor="center")
-        self.highlight_tree.column("progress", width=90, anchor="center")
-        self.highlight_tree.column("status", width=350)
-        scroll = ttk.Scrollbar(queue_box, orient="vertical", command=self.highlight_tree.yview)
-        self.highlight_tree.configure(yscrollcommand=scroll.set)
-        self.highlight_tree.grid(row=0, column=0, sticky="nsew")
-        scroll.grid(row=0, column=1, sticky="ns")
-
-        actions = ttk.Frame(page)
-        actions.grid(row=3, column=0, sticky="ew")
-        self.btn_start_highlight = ttk.Button(
-            actions, text="▶ Create Highlights", style="Primary.TButton", command=self._on_start_highlight,
-        )
-        self.btn_start_highlight.pack(side="left", padx=(0, 8))
-        ttk.Button(actions, text="Clear Highlight Source", command=self._clear_highlight).pack(side="left")
-        ttk.Label(
-            actions,
-            text="Original video + original audio • no narration • one MP4 and one SRT per highlight",
-            foreground="#475569",
-        ).pack(side="right")
+        """Compatibility hook; both modes are now built by :class:`WorkspacePage`."""
+        return None
 
     def _show_page(self, page: str) -> None:
         pages = {"recap": self.recap_page, "highlight": self.highlight_page, "settings": self.settings_page}
@@ -719,7 +617,11 @@ class MainWindow(tk.Tk):
             button.configure(state="disabled" if name == page else "normal")
 
     def _on_settings_saved(self, new_settings: AppSettings) -> None:
+        current_recap = self.recap_prompt_text.get("1.0", "end-1c")
         current_highlight = self.highlight_prompt_text.get("1.0", "end-1c") if hasattr(self, "highlight_prompt_text") else ""
+        if not current_recap.strip() or current_recap == getattr(self.settings, "prompt", ""):
+            self.recap_prompt_text.delete("1.0", tk.END)
+            self.recap_prompt_text.insert("1.0", new_settings.prompt)
         if not current_highlight.strip() or current_highlight == getattr(self.settings, "highlight_prompt", ""):
             self.highlight_prompt_text.delete("1.0", tk.END)
             self.highlight_prompt_text.insert("1.0", new_settings.highlight_prompt)
@@ -777,6 +679,7 @@ class MainWindow(tk.Tk):
         project_id = f"highlight_{clean}_{now_str}"
         self.current_project_id = project_id
         self.current_project_name = base
+        self._current_project_by_mode["HIGHLIGHT"] = project_id
         self.worker.start_highlight_project(
             project_id=project_id,
             project_name=base,
@@ -806,30 +709,38 @@ class MainWindow(tk.Tk):
         threading.Thread(target=_check, daemon=True, name="GpuCheckThread").start()
 
     def _set_discovery_busy(self, is_busy: bool, msg: str = "") -> None:
+        page = self.highlight_page if self._discovery_mode == "highlight" else self.recap_page
         if is_busy:
-            self.btn_start.config(state="disabled")
-            self.btn_stop.config(state="normal")
-            self.btn_resume.config(state="disabled")
-            self.btn_render_json.config(state="disabled")
+            page.start_button.config(state="disabled")
+            page.stop_button.config(state="normal")
+            page.resume_button.config(state="disabled")
+            if page.use_json_button is not None:
+                page.use_json_button.config(state="disabled")
             if msg:
                 self.status_var.set(msg)
-                self.source_var.set(msg)
+                (self.highlight_source_var if self._discovery_mode == "highlight" else self.source_var).set(msg)
         else:
             if not self.worker.is_running:
-                self.btn_start.config(state="normal")
-                self.btn_stop.config(state="disabled")
-                self.btn_resume.config(state="normal" if self.current_project_id else "disabled")
-                self.btn_render_json.config(state="normal")
-                self.btn_select_file.config(state="normal")
-                self.btn_select_folder.config(state="normal")
-                self.btn_clear.config(state="normal")
+                page.start_button.config(state="normal")
+                page.stop_button.config(state="disabled")
+                mode = "HIGHLIGHT" if self._discovery_mode == "highlight" else "RECAP"
+                page.resume_button.config(state="normal" if self._current_project_by_mode[mode] else "disabled")
+                if page.use_json_button is not None:
+                    page.use_json_button.config(state="normal")
+                page.select_file_button.config(state="normal")
+                page.select_folder_button.config(state="normal")
+                page.clear_button.config(state="normal")
 
     # -------------------------------------------------------------------------
     # Source Loading (Single File -> Single Episode, Folder -> Season)
     # -------------------------------------------------------------------------
     def _choose_file(self) -> None:
+        self._choose_file_for_mode("highlight" if self.current_page == "highlight" else "recap")
+
+    def _choose_file_for_mode(self, mode: str) -> None:
         if self.worker.is_running:
             return
+        self._discovery_mode = mode
         filetypes = [
             ("Video files", "*.mp4;*.mkv;*.mov;*.avi;*.webm;*.m4v;*.ts;*.m2ts"),
             ("All files", "*.*"),
@@ -840,18 +751,20 @@ class MainWindow(tk.Tk):
             filetypes=filetypes,
         )
         if chosen:
-            self._discovery_mode = "highlight" if self.current_page == "highlight" else "recap"
             self._load_file(Path(chosen))
 
     def _choose_folder(self) -> None:
+        self._choose_folder_for_mode("highlight" if self.current_page == "highlight" else "recap")
+
+    def _choose_folder_for_mode(self, mode: str) -> None:
         if self.worker.is_running:
             return
+        self._discovery_mode = mode
         chosen = filedialog.askdirectory(
             parent=self,
             title="Chọn thư mục chứa video",
         )
         if chosen:
-            self._discovery_mode = "highlight" if self.current_page == "highlight" else "recap"
             self._load_folder(Path(chosen))
 
     def _load_file(self, path: Path) -> None:
@@ -960,16 +873,12 @@ class MainWindow(tk.Tk):
                 return
 
         self.settings = self.settings_manager.load()
-        if not self.settings.prompt.strip():
-            ans = messagebox.askyesno(
-                "Kịch bản đang để trống",
-                "Kịch bản biên tập (Prompt) đang để trống. Bạn cần hướng dẫn biên tập để AI hiểu ý đồ recap.\n\n"
-                "Bạn có muốn mở Cài đặt để nhập hoặc dùng Mẫu gợi ý ngay không?",
-                parent=self,
-            )
-            if ans:
-                self._on_open_settings()
+        recap_prompt = self.recap_prompt_text.get("1.0", "end-1c").strip()
+        if not recap_prompt:
+            self.banner.show("Recap Prompt cannot be empty.", level="warning")
             return
+        self.settings.prompt = recap_prompt
+        self.settings_manager.save(self.settings)
 
         now_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         first_path = Path(self.discovered_sources[0].path)
@@ -986,6 +895,7 @@ class MainWindow(tk.Tk):
 
         self.current_project_id = proj_id
         self.current_project_name = proj_name
+        self._current_project_by_mode["RECAP"] = proj_id
 
         self._refresh_queue_table()
         self._set_running_state(True)
@@ -999,7 +909,7 @@ class MainWindow(tk.Tk):
             project_id=proj_id,
             project_name=proj_name,
             source_input=source_paths,
-            prompt=self.settings.prompt,
+            prompt=recap_prompt,
             output_dir=out_dir,
             settings=self.settings,
         )
@@ -1025,18 +935,26 @@ class MainWindow(tk.Tk):
             self._log("Người dùng bấm Dừng. Đang gửi tín hiệu hủy...")
             self.worker.cancel()
 
-    def _on_resume_current(self) -> None:
+    def _on_resume_current(self, mode: str | None = None) -> None:
         if self.worker.is_running or self.discovery_worker.is_running:
             return
-        if not self.current_project_id:
-            messagebox.showinfo("Tiếp tục", "Không có dự án đang hoạt động để tiếp tục.", parent=self)
+        expected_mode = mode or ("HIGHLIGHT" if self.current_page == "highlight" else "RECAP")
+        project_id = self._current_project_by_mode.get(expected_mode)
+        if not project_id:
+            self.banner.show("No saved project is selected for this mode.", level="info")
+            return
+        project = self.persistence.load_project(project_id)
+        if project.get("project_mode", "RECAP") != expected_mode:
+            self.banner.show("Saved project mode does not match this workspace.", level="error")
             return
 
         self._set_running_state(True)
-        self._log(f"Tiếp tục dự án '{self.current_project_id}'...")
-        self.status_var.set(f"Tiếp tục dự án '{self.current_project_name or self.current_project_id}'...")
+        self.current_project_id = project_id
+        self.current_project_name = project.get("project_name") or project_id
+        self._log(f"Tiếp tục dự án '{project_id}'...")
+        self.status_var.set(f"Tiếp tục dự án '{self.current_project_name}'...")
         self.worker.resume_project(
-            project_id=self.current_project_id,
+            project_id=project_id,
             output_dir=self.settings.output_dir or None,
             settings=self.settings,
         )
@@ -1095,9 +1013,11 @@ class MainWindow(tk.Tk):
 
     def _open_output_folder(self) -> None:
         target_dir = None
-        if self.current_project_id:
+        selected_mode = "HIGHLIGHT" if self.current_page == "highlight" else "RECAP"
+        selected_project = self.current_project_id if self.worker.is_running else self._current_project_by_mode[selected_mode]
+        if selected_project:
             try:
-                state = self.persistence.load_project(self.current_project_id)
+                state = self.persistence.load_project(selected_project)
                 target_dir = state.get("output_dir")
             except Exception:
                 pass
@@ -1147,11 +1067,8 @@ class MainWindow(tk.Tk):
         self.current_project_id = project_id
         self.current_project_name = project.get("project_name") or project_id
         mode = project.get("project_mode", "RECAP")
-        self.discovered_sources.clear()
-        self.highlight_sources.clear()
+        self._current_project_by_mode[mode] = project_id
         self._output_paths.clear()
-        for item in self.tree.get_children():
-            self.tree.delete(item)
         sources = project.get("sources", [])
         target_tree = self.highlight_tree if mode == "HIGHLIGHT" else self.tree
         for item in target_tree.get_children():
@@ -1169,7 +1086,7 @@ class MainWindow(tk.Tk):
             self.source_var.set(f"Dự án đã lưu: {self.current_project_name} ({len(sources)} video)")
             self._show_page("recap")
         self.status_var.set(f"Có thể tiếp tục dự án '{self.current_project_name}' từ checkpoint đã lưu.")
-        self.btn_resume.config(state="normal")
+        (self.highlight_page.resume_button if mode == "HIGHLIGHT" else self.recap_page.resume_button).config(state="normal")
         self._load_persisted_activity_async(project_id)
 
     def _load_persisted_activity_async(self, project_id: str) -> None:
@@ -1197,52 +1114,76 @@ class MainWindow(tk.Tk):
         except Exception as exc:
             self.banner.show(f"Không thể nạp dự án đã lưu: {exc}", level="error")
 
+    def _on_select_highlight_resume_project(self, _event: Any = None) -> None:
+        project_id = self._highlight_resume_project_ids.get(self.highlight_page.saved_combo.get())
+        if not project_id:
+            return
+        try:
+            project = self.persistence.load_project(project_id)
+            if project.get("project_mode") != "HIGHLIGHT":
+                raise ValueError("Selected project is not a Highlight project")
+            self._show_persisted_project(project)
+        except Exception as exc:
+            self.banner.show(f"Cannot load saved Highlight project: {exc}", level="error")
+
     def _check_restart_projects(self, *, select_project_id: str | None = None) -> None:
         """Detect any unfinished projects from past sessions and offer resume."""
         try:
             projects = self.persistence.list_projects()
-            resumable: Dict[str, str] = {}
+            recap_projects: Dict[str, str] = {}
+            highlight_projects: Dict[str, str] = {}
             statuses = {status.value for status in ProjectStatus if status != ProjectStatus.COMPLETED}
             for p in projects:
                 status = p.get("status")
                 project_id = p.get("project_id")
                 if status in statuses and isinstance(project_id, str) and project_id:
                     name = p.get("project_name") or project_id
-                    resumable[f"{name} — {project_id} ({status})"] = project_id
+                    target = highlight_projects if p.get("project_mode", "RECAP") == "HIGHLIGHT" else recap_projects
+                    target[f"{name} — {project_id} ({status})"] = project_id
 
-            if resumable:
-                previous_id = select_project_id or self._resume_project_ids.get(self.cmb_resume_projects.get())
-                self._resume_project_ids = resumable
-                self.cmb_resume_projects.config(values=list(resumable))
-                selected = next((label for label, project_id in resumable.items() if project_id == previous_id), None)
-                if selected is None:
-                    selected = next(iter(resumable))
-                self.cmb_resume_projects.set(selected)
-                if not self.resume_banner.winfo_manager():
-                    self.resume_banner.pack(fill="x", pady=(8, 0))
-                project_id = resumable[selected]
-                self._show_persisted_project(self.persistence.load_project(project_id))
-                self.banner.show(
-                    f"Phát hiện dự án chưa hoàn thành: {project_id}. Chọn dự án và nhấn 'Tiếp tục dự án đã lưu'.",
-                    level="info",
-                )
+            previous_recap = select_project_id or self._resume_project_ids.get(self.recap_page.saved_combo.get())
+            previous_highlight = select_project_id or self._highlight_resume_project_ids.get(self.highlight_page.saved_combo.get())
+            self._resume_project_ids = recap_projects
+            self._highlight_resume_project_ids = highlight_projects
+            recap_selected = next((label for label, pid in recap_projects.items() if pid == previous_recap), "")
+            highlight_selected = next((label for label, pid in highlight_projects.items() if pid == previous_highlight), "")
+            if not recap_selected and recap_projects:
+                recap_selected = next(iter(recap_projects))
+            if not highlight_selected and highlight_projects:
+                highlight_selected = next(iter(highlight_projects))
+            self.recap_page.show_saved_projects(list(recap_projects), recap_selected)
+            self.highlight_page.show_saved_projects(list(highlight_projects), highlight_selected)
+            if recap_selected:
+                self._current_project_by_mode["RECAP"] = recap_projects[recap_selected]
+                self.recap_page.resume_button.config(state="normal")
             else:
-                self._resume_project_ids = {}
-                self.cmb_resume_projects.set("")
-                self.cmb_resume_projects.config(values=[])
-                self.resume_banner.pack_forget()
-                self.btn_resume.config(state="disabled")
+                self.recap_page.resume_button.config(state="disabled")
+            if highlight_selected:
+                self._current_project_by_mode["HIGHLIGHT"] = highlight_projects[highlight_selected]
+                self.highlight_page.resume_button.config(state="normal")
+            else:
+                self.highlight_page.resume_button.config(state="disabled")
+            if select_project_id:
+                selected_project = next(
+                    (project for project in projects if project.get("project_id") == select_project_id), None,
+                )
+                if selected_project is not None:
+                    self._show_persisted_project(selected_project)
         except Exception as e:
             logger.warning("Failed to check restart projects: %s", e)
 
-    def _on_resume_detected_project(self) -> None:
+    def _on_resume_detected_project(self, mode: str = "RECAP") -> None:
         if self.worker.is_running or self.discovery_worker.is_running:
             return
-        proj_id = self._resume_project_ids.get(self.cmb_resume_projects.get())
+        mapping = self._highlight_resume_project_ids if mode == "HIGHLIGHT" else self._resume_project_ids
+        combo = self.highlight_page.saved_combo if mode == "HIGHLIGHT" else self.recap_page.saved_combo
+        proj_id = mapping.get(combo.get())
         if not proj_id:
             return
         try:
             proj_data = self.persistence.load_project(proj_id)
+            if proj_data.get("project_mode", "RECAP") != mode:
+                raise ValueError(f"Cannot resume {proj_data.get('project_mode', 'RECAP')} project from {mode} workspace")
             self._show_persisted_project(proj_data)
 
             final_json = proj_data.get("final_json")
@@ -1413,7 +1354,8 @@ class MainWindow(tk.Tk):
             "preparation": "Preparation", "scanner": "Scanner", "catalog": "Catalog",
             "planner": "Planner", "evidence": "Evidence", "vision": "Vision",
             "final_plan": "Final Plan", "writers": "Writers", "final_json": "Final JSON",
-            "voice": "Voice", "narration_fit": "Narration Fit", "audio_mix": "Audio", "render": "Render", "publish": "Publish",
+            "voice": "Voice", "narration_fit": "Narration Fit", "audio_mix": "Audio",
+            "subtitles": "Subtitles", "render": "Render", "publish": "Publish",
         }
         symbols = {"complete": "✓", "active": "●", "pending": "○", "retry": "↻", "skipped": "—", "failed": "!"}
         if snapshot.get("pipeline_mode") == "HIGHLIGHT":
@@ -1724,28 +1666,17 @@ class MainWindow(tk.Tk):
                     subprocess.Popen(["xdg-open", str(p)])
 
     def _set_running_state(self, is_running: bool) -> None:
-        if is_running:
-            self.btn_start.config(state="disabled")
-            self.btn_stop.config(state="normal")
-            self.btn_resume.config(state="disabled")
-            self.btn_render_json.config(state="disabled")
-            self.btn_select_file.config(state="disabled")
-            self.btn_select_folder.config(state="disabled")
-            self.btn_clear.config(state="disabled")
-            self.btn_start_highlight.config(state="disabled")
-            self.btn_highlight_file.config(state="disabled")
-            self.btn_highlight_folder.config(state="disabled")
-        else:
-            self.btn_start.config(state="normal")
-            self.btn_stop.config(state="disabled")
-            self.btn_resume.config(state="normal" if self.current_project_id else "disabled")
-            self.btn_render_json.config(state="normal")
-            self.btn_select_file.config(state="normal")
-            self.btn_select_folder.config(state="normal")
-            self.btn_clear.config(state="normal")
-            self.btn_start_highlight.config(state="normal")
-            self.btn_highlight_file.config(state="normal")
-            self.btn_highlight_folder.config(state="normal")
+        for mode, page in (("RECAP", self.recap_page), ("HIGHLIGHT", self.highlight_page)):
+            page.start_button.config(state="disabled" if is_running else "normal")
+            page.stop_button.config(state="normal" if is_running else "disabled")
+            page.resume_button.config(
+                state="disabled" if is_running else ("normal" if self._current_project_by_mode[mode] else "disabled")
+            )
+            page.select_file_button.config(state="disabled" if is_running else "normal")
+            page.select_folder_button.config(state="disabled" if is_running else "normal")
+            page.clear_button.config(state="disabled" if is_running else "normal")
+            if page.use_json_button is not None:
+                page.use_json_button.config(state="disabled" if is_running else "normal")
 
     def _log(self, message: str) -> None:
         now_str = datetime.now().strftime("%H:%M:%S")
