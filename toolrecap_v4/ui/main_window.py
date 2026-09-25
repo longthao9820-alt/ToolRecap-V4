@@ -78,6 +78,7 @@ from toolrecap_v4.workflow import OutputStatus, ProjectStatus
 from toolrecap_v4.progress import (
     ACTIVE_STATES,
     ActivityState,
+    WorkflowStage,
     PIPELINE_STAGES,
     STAGE_LABELS,
     format_duration as format_workflow_duration,
@@ -680,6 +681,8 @@ class MainWindow(tk.Tk):
         self.current_project_id = project_id
         self.current_project_name = base
         self._current_project_by_mode["HIGHLIGHT"] = project_id
+        self._set_running_state(True)
+        self._activate_operation_ui("HIGHLIGHT", resuming=False)
         self.worker.start_highlight_project(
             project_id=project_id,
             project_name=base,
@@ -687,7 +690,6 @@ class MainWindow(tk.Tk):
             prompt=prompt,
             settings=self.settings,
         )
-        self._set_running_state(True)
 
     # -------------------------------------------------------------------------
     # GPU and Updater Background Checks
@@ -899,6 +901,7 @@ class MainWindow(tk.Tk):
 
         self._refresh_queue_table()
         self._set_running_state(True)
+        self._activate_operation_ui("RECAP", resuming=False)
         self.status_var.set(f"Bắt đầu dự án: {proj_name}")
         self._log(f"Khởi động dự án mới '{proj_name}' (ID: {proj_id})...")
 
@@ -949,6 +952,7 @@ class MainWindow(tk.Tk):
             return
 
         self._set_running_state(True)
+        self._activate_operation_ui(expected_mode, resuming=True)
         self.current_project_id = project_id
         self.current_project_name = project.get("project_name") or project_id
         self._log(f"Tiếp tục dự án '{project_id}'...")
@@ -1191,6 +1195,7 @@ class MainWindow(tk.Tk):
                 self._populate_outputs_from_json(final_json)
 
             self._set_running_state(True)
+            self._activate_operation_ui(mode, resuming=True)
             self._log(f"Tiếp tục thực hiện dự án: '{proj_id}'...")
             self.settings = self.settings_manager.load()
             self.worker.resume_project(
@@ -1218,6 +1223,50 @@ class MainWindow(tk.Tk):
         finally:
             if not getattr(self, "_is_closed", False):
                 self._poll_job = safe_after(self, 100, self._poll_queue)
+
+    def _activate_operation_ui(self, mode: str, *, resuming: bool) -> None:
+        """Paint accepted Start/Resume state before background preparation begins."""
+        now = datetime.now(timezone.utc).isoformat()
+        mode_name = "Highlight" if mode == "HIGHLIGHT" else "Recap"
+        activity = "Loading saved project..." if resuming else (
+            "Preparing Highlight sources..." if mode == "HIGHLIGHT" else "Preparing sources..."
+        )
+        event = "Resume requested." if resuming else (
+            "Highlight project started." if mode == "HIGHLIGHT" else "Project started."
+        )
+        snapshot = {
+            "project_id": self.current_project_id,
+            "state": ActivityState.RESUMING.value if resuming else ActivityState.RUNNING.value,
+            "stage": WorkflowStage.PREPARATION.value,
+            "stage_label": STAGE_LABELS[WorkflowStage.PREPARATION.value],
+            "activity_text": activity,
+            "active": True,
+            "current_item": None,
+            "completed": None,
+            "total": None,
+            "percent": None,
+            "unit": "episodes",
+            "session_elapsed_seconds": 0.0,
+            "project_elapsed_seconds": (
+                self._activity_snapshot.get("project_elapsed_seconds") if resuming else 0.0
+            ),
+            "stage_elapsed_seconds": 0.0,
+            "estimated_remaining_seconds": None,
+            "recent_activity": [
+                {"timestamp": now, "text": event},
+                {"timestamp": now, "text": activity},
+            ],
+            "last_activity_at": now,
+            "event_timestamp": now,
+            "waiting_for": None,
+            "pipeline_mode": mode,
+            "pipeline": {stage: "pending" for stage in PIPELINE_STAGES},
+        }
+        snapshot["pipeline"][WorkflowStage.PREPARATION.value] = "active"
+        self._set_activity_snapshot(snapshot)
+        self.status_var.set("Resuming" if resuming else "Running")
+        # Flush layout/paint requests only; no heavy work or arbitrary sleeps.
+        self.update_idletasks()
 
     def _set_activity_snapshot(self, snapshot: Dict[str, Any], *, merge: bool = False) -> None:
         if merge:

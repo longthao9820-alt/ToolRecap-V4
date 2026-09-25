@@ -44,7 +44,7 @@ from toolrecap_v4.workflow import (
     ProjectWorkflow,
     WorkflowCallbacks,
 )
-from toolrecap_v4.progress import ActivityState, WorkflowStage
+from toolrecap_v4.progress import ActivityState, ProgressEvent, WorkflowProgressTracker, WorkflowStage
 
 logger = logging.getLogger(__name__)
 
@@ -330,15 +330,15 @@ class WorkflowWorker:
 
         def _worker_target() -> None:
             try:
-                self._put_message("activity", {
-                    "project_id": project_id, "state": ActivityState.STARTING.value,
-                    "stage": WorkflowStage.PREPARATION.value,
-                    "stage_label": "Preparing Episodes", "activity_text": "Creating project and verifying sources...",
-                    "active": True, "completed": None, "total": None, "percent": None,
-                    "session_elapsed_seconds": 0.0, "project_elapsed_seconds": 0.0,
-                    "stage_elapsed_seconds": 0.0, "estimated_remaining_seconds": None,
-                    "recent_activity": [], "last_activity_at": None,
-                })
+                pre_tracker = WorkflowProgressTracker(
+                    self.persistence, project_id,
+                    callback=lambda snapshot: self._put_message("activity", snapshot),
+                )
+                pre_tracker.begin(resuming=False)
+                pre_tracker.emit(ProgressEvent(
+                    state=ActivityState.RUNNING.value, stage=WorkflowStage.PREPARATION.value,
+                    activity_text="Project started. Preparing source media...",
+                ))
                 self._put_message("log", f"Bắt đầu khởi tạo dự án '{project_name}' ({project_id})...")
                 wf = self._create_workflow(cfg)
 
@@ -353,6 +353,11 @@ class WorkflowWorker:
                     settings=cfg,
                     cancellation_token=token,
                 )
+                pre_tracker.emit(ProgressEvent(
+                    state=ActivityState.LOCAL_PROCESSING.value, stage=WorkflowStage.PREPARATION.value,
+                    activity_text="Source inventory verified; beginning episode preparation.",
+                    completed=0, total=len(state.get("sources", [])), unit="episodes",
+                ))
                 self._put_message("log", f"Đã quét và kiểm tra {len(state.get('sources', []))} tệp video nguồn.")
 
                 # Step 2: Build callbacks
@@ -366,6 +371,7 @@ class WorkflowWorker:
                     settings=cfg,
                     cancellation_token=token,
                     callbacks=callbacks,
+                    progress_tracker=pre_tracker,
                 )
 
                 self._put_message("finished", {"status": ProjectStatus.COMPLETED.value, "project": final_state})
@@ -416,6 +422,7 @@ class WorkflowWorker:
                     persistence=self.persistence, gateway_client=gateway, settings_manager=self.settings_manager,
                     progress_callback=lambda payload: self._put_message("activity_patch", {"project_id": project_id, **payload}),
                 )
+                workflow.start_tracking(project_id, resuming=False)
                 workflow.create_project(
                     project_id=project_id, project_name=project_name, source_input=source_input,
                     prompt=prompt, settings=cfg, output_dir=output_dir, cancellation_token=token,
@@ -455,11 +462,16 @@ class WorkflowWorker:
 
         def _worker_target() -> None:
             try:
-                self._put_message("activity_patch", {
-                    "project_id": project_id, "state": ActivityState.RESUMING.value,
-                    "activity_text": "Reconstructing saved checkpoints...", "active": True,
-                    "session_elapsed_seconds": 0.0,
-                })
+                pre_tracker = WorkflowProgressTracker(
+                    self.persistence, project_id,
+                    callback=lambda snapshot: self._put_message("activity", snapshot),
+                )
+                pre_tracker.begin(resuming=True)
+                pre_tracker.emit(ProgressEvent(
+                    state=ActivityState.RESUMING.value,
+                    stage=pre_tracker.tick().get("stage") or WorkflowStage.PREPARATION.value,
+                    activity_text="Resume requested. Loading saved project...",
+                ))
                 self._put_message("log", f"Tiếp tục thực hiện dự án '{project_id}'...")
                 saved_state = self.persistence.load_project(project_id)
                 resume_mode = saved_state.get("project_mode", "RECAP")
@@ -470,6 +482,7 @@ class WorkflowWorker:
                     workflow = HighlightWorkflow(
                         persistence=self.persistence, gateway_client=gateway, settings_manager=self.settings_manager,
                         progress_callback=lambda payload: self._put_message("activity_patch", {"project_id": project_id, **payload}),
+                        tracker=pre_tracker, tracker_started=True,
                     )
                     final_state = workflow.run(project_id, settings=cfg, cancellation_token=token)
                 else:
@@ -481,6 +494,7 @@ class WorkflowWorker:
                         settings=cfg,
                         cancellation_token=token,
                         callbacks=callbacks,
+                        progress_tracker=pre_tracker,
                     )
 
                 self._put_message("finished", {"status": ProjectStatus.COMPLETED.value, "project": final_state, "mode": resume_mode})

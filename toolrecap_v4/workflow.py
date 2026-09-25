@@ -586,6 +586,7 @@ class ProjectWorkflow:
         cancellation_token: Optional[CancellationToken] = None,
         callbacks: Optional[WorkflowCallbacks] = None,
         source_preparation_pipeline: Optional[SourcePreparationPipeline] = None,
+        progress_tracker: WorkflowProgressTracker | None = None,
     ) -> Dict[str, Any]:
         """Start or run project workflow synchronously."""
         return self._execute_workflow(
@@ -595,6 +596,7 @@ class ProjectWorkflow:
             cancellation_token=cancellation_token,
             callbacks=callbacks,
             source_preparation_pipeline=source_preparation_pipeline,
+            progress_tracker=progress_tracker,
             run_mode="start",
         )
 
@@ -606,6 +608,7 @@ class ProjectWorkflow:
         cancellation_token: Optional[CancellationToken] = None,
         callbacks: Optional[WorkflowCallbacks] = None,
         source_preparation_pipeline: Optional[SourcePreparationPipeline] = None,
+        progress_tracker: WorkflowProgressTracker | None = None,
     ) -> Dict[str, Any]:
         """Resume project workflow, skipping completed outputs whose fingerprints match."""
         return self._execute_workflow(
@@ -615,6 +618,7 @@ class ProjectWorkflow:
             cancellation_token=cancellation_token,
             callbacks=callbacks,
             source_preparation_pipeline=source_preparation_pipeline,
+            progress_tracker=progress_tracker,
             run_mode="resume",
         )
 
@@ -626,6 +630,7 @@ class ProjectWorkflow:
         cancellation_token: Optional[CancellationToken] = None,
         callbacks: Optional[WorkflowCallbacks] = None,
         source_preparation_pipeline: Optional[SourcePreparationPipeline] = None,
+        progress_tracker: WorkflowProgressTracker | None = None,
     ) -> Dict[str, Any]:
         """Retry failed outputs or rerender invalidated outputs."""
         return self._execute_workflow(
@@ -635,6 +640,7 @@ class ProjectWorkflow:
             cancellation_token=cancellation_token,
             callbacks=callbacks,
             source_preparation_pipeline=source_preparation_pipeline,
+            progress_tracker=progress_tracker,
             run_mode="retry",
         )
 
@@ -658,6 +664,7 @@ class ProjectWorkflow:
         callbacks: Optional[WorkflowCallbacks] = None,
         source_preparation_pipeline: Optional[SourcePreparationPipeline] = None,
         run_mode: str = "start",
+        progress_tracker: WorkflowProgressTracker | None = None,
     ) -> Dict[str, Any]:
         """Synchronous execution engine for create/start/resume/retry."""
         validate_windows_name(project_id, "project_id")
@@ -670,12 +677,13 @@ class ProjectWorkflow:
             tracker_kwargs["monotonic"] = self.progress_monotonic
         if self.progress_wall_clock is not None:
             tracker_kwargs["wall_clock"] = self.progress_wall_clock
-        tracker = WorkflowProgressTracker(
+        tracker = progress_tracker or WorkflowProgressTracker(
             self.persistence, project_id,
             callback=callbacks.on_activity if callbacks else None,
             **tracker_kwargs,
         )
-        tracker.begin(resuming=run_mode in {"resume", "retry"})
+        if not tracker.tick().get("active"):
+            tracker.begin(resuming=run_mode in {"resume", "retry"})
 
         # Check if matching final_json exists (Resume/import NEVER Gateway once Final JSON exists)
         final_json = state.get("final_json")

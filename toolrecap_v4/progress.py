@@ -61,7 +61,7 @@ class WorkflowStage(str, enum.Enum):
 
 
 STAGE_LABELS: dict[str, str] = {
-    WorkflowStage.PREPARATION.value: "Preparing Episodes",
+    WorkflowStage.PREPARATION.value: "Preparing Sources",
     WorkflowStage.SCANNER.value: "Scanning Episode Evidence",
     WorkflowStage.CATALOG.value: "Building Season Catalog",
     WorkflowStage.PLANNER.value: "Planning Episode and Season Stories",
@@ -76,6 +76,12 @@ STAGE_LABELS: dict[str, str] = {
     WorkflowStage.SUBTITLES.value: "Building Subtitles",
     WorkflowStage.RENDER.value: "Rendering Video",
     WorkflowStage.PUBLISH.value: "Publishing Output",
+    "highlight_coverage": "Building Highlight Coverage",
+    "highlight_planner": "Planning Highlight Scenes",
+    "highlight_validation": "Validating Highlights",
+    "highlight_json": "Building Highlight JSON",
+    "highlight_render": "Rendering Highlights",
+    "highlight_srt": "Building Original Dialogue SRT",
 }
 
 PIPELINE_STAGES: tuple[str, ...] = tuple(stage.value for stage in WorkflowStage)
@@ -163,6 +169,7 @@ class ProgressEvent:
     analysis_complete: bool = False
     published_count: int | None = None
     output_folder: str | None = None
+    pipeline_mode: str | None = None
 
 
 class WorkflowProgressTracker:
@@ -291,6 +298,8 @@ class WorkflowProgressTracker:
                 "event_timestamp": _utc_iso(now_wall),
                 "previous_timing_available": True,
             })
+            if event.pipeline_mode is not None:
+                self._snapshot["pipeline_mode"] = event.pipeline_mode
             if event.published_count is not None:
                 self._snapshot["published_count"] = event.published_count
             if event.output_folder is not None:
