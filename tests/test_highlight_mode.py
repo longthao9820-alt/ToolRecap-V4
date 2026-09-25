@@ -9,6 +9,7 @@ from toolrecap_v4.highlight.renderer import render_highlight
 from toolrecap_v4.highlight.service import HighlightPlanner
 from toolrecap_v4.highlight.subtitles import highlight_srt
 from toolrecap_v4.media import CommandResult
+from toolrecap_v4.media import EncoderStatus
 from toolrecap_v4.settings import AppSettings
 from toolrecap_v4.analysis.models import PreparedEpisode, Transcript, TranscriptCue
 from toolrecap_v4.discovery import compute_file_fingerprint
@@ -100,7 +101,7 @@ def test_direct_renderer_preserves_original_audio_and_publishes_mp4_srt(tmp_path
     def runner(args, **kwargs):
         commands.append(args); Path(args[-1]).write_bytes(b"rendered-original-audio")
         return CommandResult(0, "", "")
-    result = render_highlight(project.outputs[0], sources={"e01.mp4": source}, publication_dir=tmp_path / "publication", ffmpeg_path=ffmpeg, command_runner=runner)
+    result = render_highlight(project.outputs[0], sources={"e01.mp4": source}, publication_dir=tmp_path / "publication", ffmpeg_path=ffmpeg, command_runner=runner, settings=AppSettings(use_gpu=False))
     assert result.video_path.is_file() and result.subtitle_path.is_file()
     command = commands[0]
     assert "0:a?" in command and "atempo" not in " ".join(command).lower()
@@ -112,6 +113,30 @@ def test_highlight_prompt_is_separate_and_speed_is_irrelevant():
     assert settings.prompt == "recap" and settings.highlight_prompt == "highlight"
     project = build_highlight_project(project_id="p", prompt=settings.highlight_prompt, dependency_revision="r", candidates=[candidate()], sources=SOURCES)
     assert "commentary_reading_speed" not in json.dumps(project.to_dict())
+
+
+def test_highlight_nvidia_command_uses_cuvid_nvenc_no_copy_and_exact_bounds(tmp_path: Path):
+    source = tmp_path / "e01.mp4"; source.write_bytes(b"source")
+    ffmpeg = tmp_path / "ffmpeg.exe"; ffmpeg.write_bytes(b"binary")
+    project = build_highlight_project(
+        project_id="p", prompt="x", dependency_revision="r", candidates=[candidate()], sources=SOURCES,
+    )
+    commands = []
+    def runner(args, **_kwargs):
+        commands.append(args); Path(args[-1]).write_bytes(b"video")
+        return CommandResult(0, "", "")
+    render_highlight(
+        project.outputs[0], sources={"e01.mp4": source}, publication_dir=tmp_path / "gpu",
+        ffmpeg_path=ffmpeg, command_runner=runner, settings=AppSettings(use_gpu=True),
+        encoder_status=EncoderStatus(True, "RTX 3060", "h264_nvenc", "NVIDIA NVENC"),
+        source_codec="h264",
+    )
+    args = commands[0]
+    assert "h264_cuvid" in args and "h264_nvenc" in args
+    assert not any(args[index:index + 2] == ["-c:v", "copy"] for index in range(len(args) - 1))
+    assert args[args.index("-ss") + 1] == "10.000"
+    assert args[args.index("-t") + 1] == "10.000"
+    assert "0:a?" in args
 
 
 def test_highlight_resume_reuses_plan_and_completed_publication(tmp_path: Path, monkeypatch):

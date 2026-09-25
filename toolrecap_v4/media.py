@@ -249,6 +249,7 @@ class VideoStreamInfo:
     bitrate: int | None = None
     sar: str = ""
     dar: str = ""
+    pixel_format: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -391,6 +392,7 @@ def probe_media(
             bitrate = int(s["bit_rate"]) if "bit_rate" in s and str(s["bit_rate"]).isdigit() else None
             sar = str(s.get("sample_aspect_ratio") or "")
             dar = str(s.get("display_aspect_ratio") or "")
+            pixel_format = str(s.get("pix_fmt") or "")
             video_streams_list.append(
                 VideoStreamInfo(
                     index=stream_index,
@@ -405,6 +407,7 @@ def probe_media(
                     bitrate=bitrate,
                     sar=sar,
                     dar=dar,
+                    pixel_format=pixel_format,
                 )
             )
         elif codec_type == "audio":
@@ -966,6 +969,10 @@ def get_video_encode_args(
 ) -> tuple[list[str], EncoderStatus]:
     """Return FFmpeg video encoding arguments matching desired quality and GPU availability."""
     status = encoder_status or detect_gpu_encoder(ffmpeg_path)
+    if use_gpu and not status.available:
+        raise MediaError(
+            f"GPU video render was selected but no working hardware encoder is available: {status.reason}"
+        )
     if use_gpu and status.available:
         if status.encoder == "h264_nvenc":
             cq, preset = {"standard": (23, "p4"), "high": (19, "p5"), "source": (17, "p6")}.get(
@@ -1007,3 +1014,49 @@ def get_video_encode_args(
         reason="CPU encoding selected",
     )
     return ["-c:v", "libx264", "-preset", preset, "-crf", str(crf)], cpu_status
+
+
+NVIDIA_CUVID_DECODERS = {
+    "h264": "h264_cuvid", "avc": "h264_cuvid",
+    "hevc": "hevc_cuvid", "h265": "hevc_cuvid",
+    "av1": "av1_cuvid", "vp9": "vp9_cuvid",
+    "mpeg2video": "mpeg2_cuvid", "vc1": "vc1_cuvid",
+}
+
+
+def nvidia_decode_args(
+    source_codec: str, encoder_status: EncoderStatus, pixel_format: str = "",
+) -> list[str]:
+    """Return explicit NVIDIA decode flags when the source codec supports CUVID."""
+    if not encoder_status.available or encoder_status.encoder != "h264_nvenc":
+        return []
+    decoder = NVIDIA_CUVID_DECODERS.get(str(source_codec).casefold())
+    if decoder is None:
+        return []
+    # NVDEC/CUVID does not support common H.264 4:4:4 profiles.  These inputs
+    # decode on CPU, then upload once for CUDA scale/pad and NVENC encode.
+    if "444" in str(pixel_format).casefold():
+        return []
+    return [
+        "-hwaccel", "cuda", "-hwaccel_device", "0",
+        "-hwaccel_output_format", "cuda", "-c:v", decoder,
+    ]
+
+
+def nvidia_scale_pad_filter(
+    *, canvas_width: int, canvas_height: int, fps: float,
+    source_duration: float, hold_duration: float = 0.0,
+    hardware_input: bool = True,
+) -> str:
+    """GPU scale followed by one deliberate download for lightweight timing/pad filters."""
+    hold = f",tpad=stop_mode=clone:stop_duration={hold_duration:.6f}" if hold_duration > 0 else ""
+    upload = "" if hardware_input else "format=nv12,hwupload_cuda,"
+    return (
+        upload +
+        "scale_cuda=w=trunc(ih*dar/2)*2:h=ih,"
+        f"scale_cuda=w={canvas_width}:h={canvas_height}:force_original_aspect_ratio=decrease:"
+        f"force_divisible_by=2,"
+        "hwdownload,format=nv12,"
+        f"pad={canvas_width}:{canvas_height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,"
+        f"fps={fps},format=yuv420p,trim=0:{source_duration:.6f},setpts=PTS-STARTPTS{hold}"
+    )

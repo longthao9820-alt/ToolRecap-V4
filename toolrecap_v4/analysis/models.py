@@ -373,6 +373,7 @@ class PreparedEpisode:
                 bitrate=int(v_raw["bitrate"]) if v_raw.get("bitrate") is not None else None,
                 sar=str(v_raw.get("sar", "")),
                 dar=str(v_raw.get("dar", "")),
+                pixel_format=str(v_raw.get("pixel_format", "")),
             )
 
         def _parse_audio(a_raw: dict[str, Any] | None) -> AudioStreamInfo | None:

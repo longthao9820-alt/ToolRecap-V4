@@ -27,6 +27,8 @@ from toolrecap_v4.media import (
     detect_gpu_encoder,
     find_binary,
     get_video_encode_args,
+    nvidia_decode_args,
+    nvidia_scale_pad_filter,
     is_commentary_or_descriptive,
     is_english_language,
     is_main_audio,
@@ -543,9 +545,13 @@ def test_get_video_encode_args_matching_quality() -> None:
     status = detect_gpu_encoder()
 
     for quality in ("standard", "high", "source"):
-        args, selected = get_video_encode_args(quality, use_gpu=True, encoder_status=status)
-        assert "-c:v" in args
-        assert selected.encoder == status.encoder
+        if status.available:
+            args, selected = get_video_encode_args(quality, use_gpu=True, encoder_status=status)
+            assert "-c:v" in args
+            assert selected.encoder == status.encoder
+        else:
+            with pytest.raises(MediaError, match="no working hardware encoder"):
+                get_video_encode_args(quality, use_gpu=True, encoder_status=status)
 
     # Forced CPU fallback
     cpu_args, cpu_status = get_video_encode_args("high", use_gpu=False, encoder_status=status)
@@ -553,6 +559,26 @@ def test_get_video_encode_args_matching_quality() -> None:
     assert "libx264" in cpu_args
     assert "-crf" in cpu_args
     assert cpu_status.encoder == "libx264"
+
+
+def test_nvidia_selected_uses_nvenc_decode_and_never_silent_cpu_fallback() -> None:
+    nvenc = EncoderStatus(True, "NVIDIA GeForce RTX 3060", "h264_nvenc", "NVIDIA NVENC")
+    args, selected = get_video_encode_args("high", use_gpu=True, encoder_status=nvenc)
+    assert selected.encoder == "h264_nvenc" and "h264_nvenc" in args and "libx264" not in args
+    decode = nvidia_decode_args("h264", nvenc)
+    assert decode == [
+        "-hwaccel", "cuda", "-hwaccel_device", "0",
+        "-hwaccel_output_format", "cuda", "-c:v", "h264_cuvid",
+    ]
+    unavailable = EncoderStatus(False, "NVIDIA GeForce RTX 3060", "libx264", "CPU", "NVENC failed")
+    with pytest.raises(MediaError, match="NVENC failed"):
+        get_video_encode_args("high", use_gpu=True, encoder_status=unavailable)
+    graph = nvidia_scale_pad_filter(
+        canvas_width=1920, canvas_height=1080, fps=30.0,
+        source_duration=4.25, hold_duration=0.75, hardware_input=True,
+    )
+    assert "scale_cuda" in graph and "hwdownload" in graph
+    assert "pad=1920:1080" in graph and "tpad=stop_mode=clone" in graph
 
 
 def test_encoder_usable_real_and_invalid() -> None:

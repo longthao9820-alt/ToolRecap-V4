@@ -49,6 +49,8 @@ from toolrecap_v4.media import (
     detect_gpu_encoder,
     find_binary,
     get_video_encode_args,
+    nvidia_decode_args,
+    nvidia_scale_pad_filter,
     probe_duration,
     probe_media,
     run_command,
@@ -508,8 +510,12 @@ def render_output(
                 "-accurate_seek",
                 "-ss", f"{seg_start_s:.6f}",
                 "-t", f"{source_visual_s:.6f}",
-                "-i", str(src_path),
             ]
+            source_codec = src_probe.video_streams[0].codec if src_probe.video_streams else ""
+            source_pixel_format = src_probe.video_streams[0].pixel_format if src_probe.video_streams else ""
+            decode_args = nvidia_decode_args(source_codec, enc_status, source_pixel_format)
+            cmd.extend(decode_args)
+            cmd.extend(["-i", str(src_path)])
 
             input_count = 1
             has_usable_source_audio = src_probe.has_audio and source_audio_enabled
@@ -533,13 +539,22 @@ def render_output(
 
             # Video filter: aspect-fit into canvas, pad borders, set FPS and yuv420p
             # Normalize anamorphic pixels to square pixels via ih*dar before aspect-fit scale
-            hold_filter=f",tpad=stop_mode=clone:stop_duration={hold_s:.6f}" if hold_s>0 else ""
-            v_filter = (
-                f"[0:v]scale=ih*dar:ih,scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-                f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,"
-                f"fps={canvas_fps},format=yuv420p,"
-                f"trim=0:{source_visual_s:.6f},setpts=PTS-STARTPTS{hold_filter}[vout]"
-            )
+            if enc_status.encoder == "h264_nvenc":
+                v_filter = (
+                    "[0:v]" + nvidia_scale_pad_filter(
+                        canvas_width=canvas_w, canvas_height=canvas_h, fps=canvas_fps,
+                        source_duration=source_visual_s, hold_duration=hold_s,
+                        hardware_input=bool(decode_args),
+                    ) + "[vout]"
+                )
+            else:
+                hold_filter=f",tpad=stop_mode=clone:stop_duration={hold_s:.6f}" if hold_s>0 else ""
+                v_filter = (
+                    f"[0:v]scale=ih*dar:ih,scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                    f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,"
+                    f"fps={canvas_fps},format=yuv420p,"
+                    f"trim=0:{source_visual_s:.6f},setpts=PTS-STARTPTS{hold_filter}[vout]"
+                )
 
             filter_chains = [v_filter]
 
@@ -592,7 +607,12 @@ def render_output(
                 str(seg_mkv),
             ])
 
-            run_command(cmd, timeout=120.0, cancellation_token=cancellation_token, check=True)
+            try:
+                run_command(cmd, timeout=120.0, cancellation_token=cancellation_token, check=True)
+            except Exception as exc:
+                if enc_status.encoder == "h264_nvenc":
+                    raise RenderError(f"NVIDIA GPU render unavailable: NVENC/CUDA segment render failed: {exc}") from exc
+                raise
             if not seg_mkv.is_file() or seg_mkv.stat().st_size == 0:
                 raise RenderError(f"Failed to produce intermediate segment MKV for segment '{seg_id}'.")
             segment_mkv_paths.append(seg_mkv)
@@ -711,9 +731,9 @@ def render_output(
                 esc_path = escape_ffmpeg_subtitles_path(burn_file)
                 video_final_args = ["-vf", f"subtitles='{esc_path}'", *v_args]
             else:
-                video_final_args = ["-c:v", "copy"]
+                video_final_args = list(v_args)
         else:
-            video_final_args = ["-c:v", "copy"]
+            video_final_args = list(v_args)
 
         # Pass 2: Final encode to temp_final_mp4
         temp_final_mp4 = temp_dir / f"{title}.mp4"
@@ -724,10 +744,15 @@ def render_output(
             activity_text=f"Encoding final video with {encoder_label}...",
             current_item=render_id,
         )
-        run_command(
-            [
+        final_decode_args = (
+            nvidia_decode_args("h264", enc_status)
+            if enc_status.encoder == "h264_nvenc" and not burn_subtitles else []
+        )
+        try:
+            run_command([
                 str(ffmpeg),
                 "-y",
+                *final_decode_args,
                 "-i", str(assembled_mkv),
                 *video_final_args,
                 "-af", loudnorm_filter,
@@ -736,11 +761,11 @@ def render_output(
                 "-ar", "48000",
                 "-ac", "2",
                 str(temp_final_mp4),
-            ],
-            timeout=180.0,
-            cancellation_token=cancellation_token,
-            check=True,
-        )
+            ], timeout=180.0, cancellation_token=cancellation_token, check=True)
+        except Exception as exc:
+            if enc_status.encoder == "h264_nvenc":
+                raise RenderError(f"NVIDIA GPU render unavailable: final NVENC encode failed: {exc}") from exc
+            raise
 
         # Technical validation of rendered output before publication
         if not temp_final_mp4.is_file() or temp_final_mp4.stat().st_size == 0:

@@ -10,7 +10,11 @@ import tempfile
 from typing import Callable, Mapping
 
 from toolrecap_v4.cancellation import CancellationToken
-from toolrecap_v4.media import CommandResult, find_binary, run_command
+from toolrecap_v4.media import (
+    CommandResult, EncoderStatus, find_binary, get_video_encode_args,
+    nvidia_decode_args, run_command,
+)
+from toolrecap_v4.settings import AppSettings
 from .models import HighlightOutput
 from .subtitles import highlight_srt
 from toolrecap_v4.original_dialogue import ORIGINAL_DIALOGUE_MAPPED, NO_ORIGINAL_DIALOGUE
@@ -38,6 +42,10 @@ def _sha(path: Path) -> str:
 def render_highlight(
     output: HighlightOutput, *, sources: Mapping[str, Path | str], publication_dir: Path | str,
     ffmpeg_path: Path | str | None = None,
+    settings: AppSettings | None = None,
+    encoder_status: EncoderStatus | None = None,
+    source_codec: str = "h264",
+    source_pixel_format: str = "",
     command_runner: Callable[..., CommandResult] = run_command,
     cancellation_token: CancellationToken | None = None,
 ) -> HighlightRenderResult:
@@ -61,6 +69,10 @@ def render_highlight(
     if source in (video.resolve(), subtitle.resolve()):
         raise ValueError("Highlight publication collides with its source")
     ffmpeg = find_binary("ffmpeg", ffmpeg_path)
+    cfg = settings or AppSettings()
+    video_args, selected_encoder = get_video_encode_args(
+        cfg.quality, use_gpu=cfg.use_gpu, encoder_status=encoder_status, ffmpeg_path=ffmpeg,
+    )
     if cancellation_token:
         cancellation_token.check_cancelled()
     with tempfile.TemporaryDirectory(prefix="toolrecap_highlight_", dir=target_dir) as temp_name:
@@ -70,15 +82,22 @@ def render_highlight(
         duration = (output.end_ms - output.start_ms) / 1000.0
         args = [
             str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
-            "-ss", f"{output.start_ms / 1000.0:.3f}", "-i", str(source),
+            "-accurate_seek", "-ss", f"{output.start_ms / 1000.0:.3f}",
+            *nvidia_decode_args(source_codec, selected_encoder, source_pixel_format), "-i", str(source),
             "-t", f"{duration:.3f}", "-map", "0:v:0", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+            *video_args,
             "-c:a", "aac", "-b:a", "192k", "-avoid_negative_ts", "make_zero",
             str(staged_video),
         ]
-        result = command_runner(args, timeout=max(120.0, duration * 4.0), cancellation_token=cancellation_token)
+        try:
+            result = command_runner(args, timeout=max(120.0, duration * 4.0), cancellation_token=cancellation_token)
+        except Exception as exc:
+            if selected_encoder.encoder == "h264_nvenc":
+                raise RuntimeError(f"NVIDIA GPU render unavailable: NVENC initialization failed: {exc}") from exc
+            raise
         if result.exit_code != 0 or not staged_video.is_file():
-            raise RuntimeError(f"Highlight render failed: {result.stderr[-500:]}")
+            prefix = "NVIDIA GPU render unavailable: NVENC initialization failed" if selected_encoder.encoder == "h264_nvenc" else "Highlight render failed"
+            raise RuntimeError(f"{prefix}: {result.stderr[-500:]}")
         staged_srt.write_text(highlight_srt(output), encoding="utf-8", newline="\n")
         if cancellation_token:
             cancellation_token.check_cancelled()

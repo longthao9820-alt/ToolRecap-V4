@@ -19,6 +19,7 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import inspect
 from typing import Any
 from unittest.mock import MagicMock
 import wave
@@ -54,6 +55,10 @@ from toolrecap_v4.settings import AppSettings
 from toolrecap_v4.subtitles import parse_srt
 from toolrecap_v4.subtitles import SubtitleCue
 from toolrecap_v4.voice_studio import VoiceStudioAdapter
+
+
+def test_final_video_render_never_uses_stream_copy() -> None:
+    assert '"-c:v", "copy"' not in inspect.getsource(render_output)
 
 
 def test_global_source_audio_and_original_dialogue_across_beginning_middle_end(tmp_path: Path, synthetic_sources):
