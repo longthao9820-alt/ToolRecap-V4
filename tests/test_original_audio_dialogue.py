@@ -19,6 +19,7 @@ from toolrecap_v4.original_dialogue import (
     ORIGINAL_DIALOGUE_MAPPED,
     OriginalDialogueSubtitleMapper,
     ResolvedSourceClip,
+    narration_contains_source_dialogue,
 )
 from toolrecap_v4.settings import AppSettings
 from toolrecap_v4.subtitles import SubtitleCue, build_srt
@@ -136,6 +137,32 @@ def test_writer_dialogue_is_rejected_from_tts_and_valid_commentary_keeps_source_
     assert segment["type"] == "narration"
     assert segment["source_audio"] is True
     assert segment["narration"] == "The confrontation raises the stakes."
+
+
+def test_character_name_and_sound_caption_are_not_verbatim_speech():
+    narration = "Walt and Jesse identify their downstairs captive as Krazy-8."
+    assert not narration_contains_source_dialogue(
+        narration, ("Krazy-8.", "[KRAZY-8 COUGHING]"),
+    )
+    assert narration_contains_source_dialogue(
+        "The narrator repeats: I need water.", ("I need water.",),
+    )
+    assert narration_contains_source_dialogue("The narrator says: Shut up!", ("Shut up!",))
+
+
+def test_writer_validator_accepts_narrating_a_character_name(tmp_path: Path):
+    episode, plan, visual, job, validator = _finalization_context(tmp_path)
+    validator.eps[episode.episode_id] = PreparedEpisode(
+        episode.episode_id, episode.source_id, episode.source_path,
+        episode.duration_ms, episode.canvas_width, episode.canvas_height,
+        source_basename=episode.source_basename,
+        transcript=Transcript(
+            episode_id="E01", source_type="embedded", source_format="srt",
+            cues=(TranscriptCue("E01-CUE-0218", 1_000, 3_000, "Krazy-8."),),
+        ),
+    )
+    response = _writer_response(plan.plan_hash, "Krazy-8 is awake downstairs.")
+    assert validator.validate(job, json.dumps(response)).state == "VALID"
 
 
 def test_voice_cache_defense_rejects_source_dialogue_before_voicestudio(tmp_path: Path):

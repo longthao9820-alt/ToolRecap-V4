@@ -103,12 +103,22 @@ def normalize_spoken_text(value: str) -> str:
 
 
 def narration_contains_source_dialogue(narration: str, dialogue_texts: Sequence[str]) -> bool:
-    """Reject source speech routed into TTS, including quoted dialogue."""
-    normalized_narration = normalize_spoken_text(narration)
-    if not normalized_narration:
+    """Reject substantive verbatim speech without treating names as dialogue."""
+    narration_words = normalize_spoken_text(narration).split()
+    if not narration_words:
         return False
     for text in dialogue_texts:
-        normalized_dialogue = normalize_spoken_text(text)
-        if len(normalized_dialogue) >= 4 and normalized_dialogue in normalized_narration:
+        caption = text.strip()
+        if caption.startswith("[") and caption.endswith("]"):
+            # Captions such as [KRAZY-8 COUGHING] describe sounds, not speech.
+            continue
+        if len(caption.split()) < 2:
+            # A standalone name such as "Krazy-8." may be mentioned freely
+            # while narrating a source-grounded story.
+            continue
+        dialogue_words = normalize_spoken_text(caption).split()
+        width = len(dialogue_words)
+        if any(narration_words[index:index + width] == dialogue_words
+               for index in range(len(narration_words) - width + 1)):
             return True
     return False

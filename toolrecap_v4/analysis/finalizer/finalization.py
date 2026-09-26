@@ -22,7 +22,7 @@ from toolrecap_v4.analysis.finalizer.writer_contract import (
     parse_json_object,safely_unwrap_single_writer,validation_diagnostics,
 )
 
-VALIDATOR_VERSION="writer-validator-v3";MAPPING_VERSION="writer-to-final-json-v2";REPAIR_PROTOCOL_VERSION="writer-repair-v2"
+VALIDATOR_VERSION="writer-validator-v4";MAPPING_VERSION="writer-to-final-json-v2";REPAIR_PROTOCOL_VERSION="writer-repair-v2"
 def _canon(v):return json.dumps(v,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()
 def _digest(v):return hashlib.sha256(_canon(v)).hexdigest()
 
