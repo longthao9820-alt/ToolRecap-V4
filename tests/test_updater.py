@@ -71,9 +71,9 @@ def _write_valid_package(package_dir: Path, version: str = "4.1.0") -> Path:
 def test_semver_single_version_source():
     """Verify single source of truth __version__ parses as valid SemVer."""
     cur = SemVer.parse(__version__)
-    assert cur == SemVer.parse("1.0.1")
+    assert cur == SemVer.parse("1.0.2")
     assert cur.minor == 0
-    assert cur.patch == 1
+    assert cur.patch == 2
 
 
 def test_semver_comparisons():
