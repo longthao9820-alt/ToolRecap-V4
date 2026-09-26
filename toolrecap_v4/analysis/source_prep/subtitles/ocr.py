@@ -455,13 +455,30 @@ class OcrAdapter:
             except ImportError:
                 return False
 
+    @staticmethod
+    def bundled_models_ready() -> bool:
+        """The portable RapidOCR package includes its own offline ONNX models."""
+        try:
+            import rapidocr_onnxruntime
+        except ImportError:
+            return False
+        model_dir = Path(rapidocr_onnxruntime.__file__).resolve().parent / "models"
+        return all(
+            (model_dir / name).is_file() and (model_dir / name).stat().st_size > 0
+            for name in (
+                "ch_PP-OCRv4_det_infer.onnx",
+                "ch_PP-OCRv4_rec_infer.onnx",
+                "ch_ppocr_mobile_v2.0_cls_infer.onnx",
+            )
+        )
+
     def is_engine_ready(self) -> bool:
         """Check whether local engine or custom engine is ready."""
         if self._initialized:
             return True
         if not self.is_package_installed():
             return False
-        return self.model_manager.is_ready()
+        return self.model_manager.is_ready() or self.bundled_models_ready()
 
     def _get_engine(self) -> Any:
         if self._engine is not None:
@@ -477,15 +494,17 @@ class OcrAdapter:
                     "RapidOCR package not installed; local bitmap OCR runtime unavailable"
                 ) from exc
 
-        if not self.model_manager.is_ready():
-            raise ToolRecapError("OCR models not available or checksums unverified; download first")
-
-        paths = self.model_manager.get_model_paths()
-        self._engine = RapidOCR(
-            det_model_path=str(paths["det"]),
-            rec_model_path=str(paths["rec"]),
-            cls_model_path=str(paths["cls"]),
-        )
+        if self.model_manager.is_ready():
+            paths = self.model_manager.get_model_paths()
+            self._engine = RapidOCR(
+                det_model_path=str(paths["det"]),
+                rec_model_path=str(paths["rec"]),
+                cls_model_path=str(paths["cls"]),
+            )
+        elif self.bundled_models_ready():
+            self._engine = RapidOCR()
+        else:
+            raise ToolRecapError("OCR models are missing from both portable runtime and verified local cache")
         self._initialized = True
         return self._engine
 

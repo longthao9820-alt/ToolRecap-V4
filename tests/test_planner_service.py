@@ -11,7 +11,7 @@ from toolrecap_v4.analysis.finalizer.catalog import CatalogBuilder
 from toolrecap_v4.analysis.finalizer.planner import PLANNER_PROTOCOL_VERSION
 from toolrecap_v4.analysis.finalizer.planner_service import PlannerConfig, PlannerService
 from toolrecap_v4.cancellation import CancellationToken
-from toolrecap_v4.errors import CancelledError, PlannerCapacityError, PlannerRoundLimitError
+from toolrecap_v4.errors import CancelledError, PlannerCapacityError, PlannerRepairExhaustedError
 from toolrecap_v4.gateway import GatewayResult
 
 
@@ -101,11 +101,89 @@ def test_multiple_evidence_rounds_and_round_limit(env):
         project_id="project-1", raw_recap_prompt="Prompt", catalog=catalog,
     )
     assert result.round_count == 3
-    limited_gateway = FakeGateway([request_response(catalog, "round-001", 1)])
-    with pytest.raises(PlannerRoundLimitError):
-        PlannerService(limited_gateway, root, PlannerConfig("limited-route", max_rounds=1)).run(
-            project_id="project-1", raw_recap_prompt="Prompt", catalog=catalog,
-        )
+    limited_gateway = FakeGateway([
+        request_response(catalog, "round-001", 1),
+        draft_response(catalog, round_id="round-002"),
+    ])
+    finalized = PlannerService(limited_gateway, root, PlannerConfig("limited-route", max_rounds=1)).run(
+        project_id="project-1", raw_recap_prompt="Prompt", catalog=catalog,
+    )
+    assert finalized.round_count == 2
+    final_prompt = json.loads(limited_gateway.calls[1]["prompt"])
+    assert final_prompt["allowed_actions"] == ["PLANNER_DRAFT"]
+    assert "REQUEST_EVIDENCE" not in final_prompt["response_contract"]
+
+
+def test_planner_carries_all_fetched_evidence_and_resumes_after_repeated_final_request(env):
+    root, catalog = env
+    first = request_response(catalog, "round-001")
+    first["requests"][0]["evidence_ids"] = ["E01-EV-001"]
+    second = request_response(catalog, "round-002")
+    second["requests"][0]["evidence_ids"] = ["E01-EV-002"]
+    third = request_response(catalog, "round-003")
+    third["requests"][0]["evidence_ids"] = ["E01-EV-001"]
+
+    class CrashBeforeSynthesis(FakeGateway):
+        def submit_text_chat(self, **kwargs):
+            if len(self.calls) == 3:
+                raise RuntimeError("interrupted before final synthesis")
+            return super().submit_text_chat(**kwargs)
+
+    first_gateway = CrashBeforeSynthesis([first, second, third])
+    service = PlannerService(first_gateway, root, PlannerConfig("resume-route", max_rounds=3))
+    with pytest.raises(RuntimeError, match="interrupted before final synthesis"):
+        service.run(project_id="project-1", raw_recap_prompt="Prompt", catalog=catalog)
+    third_prompt = json.loads(first_gateway.calls[2]["prompt"])
+    assert third_prompt["already_fetched_evidence_ids"] == ["E01-EV-001", "E01-EV-002"]
+
+    resumed_gateway = FakeGateway([draft_response(catalog, round_id="round-004")])
+    resumed = PlannerService(resumed_gateway, root, PlannerConfig("resume-route", max_rounds=3)).run(
+        project_id="project-1", raw_recap_prompt="Prompt", catalog=catalog,
+    )
+    assert resumed.round_count == 4
+    assert len(resumed_gateway.calls) == 1
+    final_prompt = json.loads(resumed_gateway.calls[0]["prompt"])
+    assert final_prompt["allowed_actions"] == ["PLANNER_DRAFT"]
+    assert final_prompt["evidence_rounds_remaining"] == 0
+    assert final_prompt["exact_full_evidence_fetch"]["source_round_ids"] == [
+        "round-001", "round-002", "round-003",
+    ]
+    assert [item["evidence_id"] for item in final_prompt["exact_full_evidence_fetch"]["items"]] == [
+        "E01-EV-001", "E01-EV-002",
+    ]
+
+
+def test_final_synthesis_request_is_repaired_before_round_limit(env):
+    root, catalog = env
+    gateway = FakeGateway([
+        request_response(catalog, "round-001"),
+        request_response(catalog, "round-002"),
+        draft_response(catalog, round_id="round-002"),
+    ])
+    result = PlannerService(
+        gateway, root, PlannerConfig("draft-only-route", max_rounds=1, repair_attempts=1),
+    ).run(project_id="project-1", raw_recap_prompt="Prompt", catalog=catalog)
+    assert result.round_count == 2
+    assert [call["phase"] for call in gateway.calls] == [
+        "season_planner", "season_planner", "season_planner_repair",
+    ]
+    repair = json.loads(gateway.calls[2]["prompt"])
+    assert "final_draft_required" in repair["validation_errors"]
+    assert "REQUEST_EVIDENCE" not in repair["response_contract"]
+
+
+def test_final_synthesis_refusal_remains_bounded(env):
+    root, catalog = env
+    gateway = FakeGateway([
+        request_response(catalog, "round-001"),
+        request_response(catalog, "round-002"),
+        request_response(catalog, "round-002"),
+    ])
+    with pytest.raises(PlannerRepairExhaustedError, match="final_draft_required"):
+        PlannerService(
+            gateway, root, PlannerConfig("bounded-route", max_rounds=1, repair_attempts=1),
+        ).run(project_id="project-1", raw_recap_prompt="Prompt", catalog=catalog)
+    assert len(gateway.calls) == 3
 
 
 def test_invalid_response_gets_bounded_technical_repair(env):

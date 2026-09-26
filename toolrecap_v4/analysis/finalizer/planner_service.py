@@ -33,6 +33,7 @@ from toolrecap_v4.errors import (
     PlannerRepairExhaustedError,
     PlannerResponseError,
     PlannerRoundLimitError,
+    PlannerSessionError,
     PlannerValidationError,
 )
 from toolrecap_v4.gateway import GatewayClient
@@ -77,6 +78,44 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _cumulative_evidence_fetch(
+    catalog: SeasonEvidenceCatalog, fetched_rounds: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Carry every previously fetched Full Evidence item into the next round."""
+    by_id: dict[str, dict[str, Any]] = {}
+    round_ids: list[str] = []
+    for fetched in fetched_rounds:
+        if (not isinstance(fetched, dict)
+                or fetched.get("evidence_revision") != catalog.evidence_revision
+                or not isinstance(fetched.get("completeness"), dict)
+                or fetched["completeness"].get("complete") is not True
+                or not isinstance(fetched.get("items"), list)):
+            raise PlannerSessionError("Saved Planner Evidence fetch is incomplete or stale.")
+        round_ids.append(str(fetched["round_id"]))
+        for item in fetched["items"]:
+            if not isinstance(item, dict) or not isinstance(item.get("evidence_id"), str):
+                raise PlannerSessionError("Saved Planner Evidence item is malformed.")
+            evidence_id = item["evidence_id"]
+            if evidence_id in by_id and by_id[evidence_id] != item:
+                raise PlannerSessionError(f"Conflicting Full Evidence for {evidence_id} across Planner rounds.")
+            by_id[evidence_id] = item
+    ordered = [by_id.pop(item.evidence_id) for item in catalog.items if item.evidence_id in by_id]
+    if by_id:
+        raise PlannerSessionError("Planner fetch contains Evidence absent from the active Catalog.")
+    payload = {
+        "protocol_version": "planner-evidence-cumulative-v1",
+        "evidence_revision": catalog.evidence_revision,
+        "source_round_ids": round_ids,
+        "items": ordered,
+        "completeness": {
+            "complete": True, "retrieval_round_count": len(round_ids),
+            "unique_item_count": len(ordered),
+        },
+    }
+    payload["result_hash"] = _digest(payload)
+    return payload
 
 
 class PlannerService:
@@ -131,7 +170,21 @@ class PlannerService:
         store: PlannerStore,
         cancellation_token: CancellationToken | None,
         measurements: list[dict[str, Any]],
+        require_draft: bool = False,
     ) -> PlannerAction:
+        def _validate_response(raw: str) -> PlannerAction:
+            parsed = parse_planner_json(raw, project_id=project_id, round_id=round_id)
+            action = validate_planner_action(
+                parsed, project_id=project_id, round_id=round_id, catalog=catalog,
+            )
+            if require_draft and action.action != "PLANNER_DRAFT":
+                raise PlannerValidationError(
+                    "Final Planner synthesis round must return PLANNER_DRAFT.",
+                    issue_codes=("final_draft_required",),
+                    project_id=project_id, round_id=round_id,
+                )
+            return action
+
         recovered = store.load_latest_raw(round_id, dependency_digest)
         next_attempt = 0
         invalid_raw = ""
@@ -139,10 +192,7 @@ class PlannerService:
         if recovered is not None:
             recovered_attempt, invalid_raw = recovered
             try:
-                parsed = parse_planner_json(invalid_raw, project_id=project_id, round_id=round_id)
-                return validate_planner_action(
-                    parsed, project_id=project_id, round_id=round_id, catalog=catalog,
-                )
+                return _validate_response(invalid_raw)
             except PlannerValidationError as exc:
                 errors = exc.issue_codes
             except PlannerResponseError as exc:
@@ -211,10 +261,7 @@ class PlannerService:
                 dependency_digest=dependency_digest, measurement=measurement,
             )
             try:
-                parsed = parse_planner_json(result.raw_response, project_id=project_id, round_id=round_id)
-                return validate_planner_action(
-                    parsed, project_id=project_id, round_id=round_id, catalog=catalog,
-                )
+                return _validate_response(result.raw_response)
             except PlannerValidationError as exc:
                 errors = exc.issue_codes
             except PlannerResponseError as exc:
@@ -268,12 +315,15 @@ class PlannerService:
             catalog=catalog, evidence_store=evidence_store,
         )
         measurements: list[dict[str, Any]] = []
-        previous_fetch: dict[str, Any] | None = None
+        fetched_rounds: list[dict[str, Any]] = []
         previous_round_id = ""
-        for round_number in range(1, self.config.max_rounds + 1):
+        # The configured rounds bound Evidence retrieval. One final synthesis
+        # round receives every fetched item and must produce a Planner Draft.
+        for round_number in range(1, self.config.max_rounds + 2):
             if cancellation_token:
                 cancellation_token.check_cancelled()
             round_id = f"round-{round_number:03d}"
+            final_draft_round = round_number > self.config.max_rounds
             self._emit(
                 state=ActivityState.RUNNING.value,
                 activity_text=f"Planner round {round_number}: building request...",
@@ -290,20 +340,30 @@ class PlannerService:
                     prompt = build_initial_planner_prompt(
                         project_id=project_id, round_id=round_id,
                         raw_recap_prompt=raw_recap_prompt, catalog=catalog,
+                        evidence_round_budget=self.config.max_rounds,
                     )
                 else:
                     prompt = build_followup_planner_prompt(
                         project_id=project_id, round_id=round_id,
                         raw_recap_prompt=raw_recap_prompt, catalog=catalog,
-                        prior_round_id=previous_round_id, evidence_fetch=previous_fetch or {},
+                        prior_round_id=previous_round_id,
+                        evidence_fetch=_cumulative_evidence_fetch(catalog, fetched_rounds),
+                        final_draft_round=final_draft_round,
+                        evidence_rounds_remaining=max(0, self.config.max_rounds - round_number + 1),
                     )
                 action = self._request_round(
                     project_id=project_id, round_id=round_id, prompt=prompt,
                     catalog=catalog, dependency_digest=dependency_digest, store=store,
                     cancellation_token=cancellation_token, measurements=measurements,
+                    require_draft=final_draft_round,
                 )
                 fetch_dict = None
                 if action.action == "REQUEST_EVIDENCE":
+                    if final_draft_round:
+                        raise PlannerRoundLimitError(
+                            "Planner requested Evidence after its final synthesis round.",
+                            project_id=project_id, round_id=round_id,
+                        )
                     requested = len(action.requests)
                     self._emit(
                         state=ActivityState.LOCAL_PROCESSING.value,
@@ -343,11 +403,16 @@ class PlannerService:
                     project_id, session_id, dependency_digest, action.draft,
                     round_number, tuple(measurements), False, store.draft_path,
                 )
-            if round_number == self.config.max_rounds:
+            if final_draft_round:
                 raise PlannerRoundLimitError(
-                    f"Planner requested more Evidence after maximum round {round_number}.",
+                    "Planner requested Evidence after its final synthesis round.",
                     project_id=project_id, round_id=round_id,
                 )
-            previous_fetch = fetch_dict
+            if fetch_dict is None:
+                raise PlannerSessionError(
+                    f"Saved Planner request round {round_id} lacks its Evidence fetch.",
+                    project_id=project_id, round_id=round_id,
+                )
+            fetched_rounds.append(fetch_dict)
             previous_round_id = round_id
         raise PlannerRoundLimitError("Planner round limit exhausted.", project_id=project_id)

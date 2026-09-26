@@ -312,7 +312,7 @@ class SubtitlePipeline:
                 )
             elif fmt in ("pgs", "sup"):
                 pgs_events = parse_pgs_sup(file_to_parse)
-                cues, dropped_cues = self._ocr_events(
+                cues, dropped_cues, ocr_diagnostics = self._ocr_events(
                     pgs_events,
                     track=track,
                     episode_id=episode_id,
@@ -321,9 +321,10 @@ class SubtitlePipeline:
                     cancellation_token=cancellation_token,
                 )
                 diag.append(f"Decoded {len(pgs_events)} PGS events; OCR produced {len(cues)} cues")
+                diag.extend(ocr_diagnostics)
             elif fmt in ("vobsub", "idx"):
                 vob_events = extract_vobsub_events(file_to_parse)
-                cues, dropped_cues = self._ocr_events(
+                cues, dropped_cues, ocr_diagnostics = self._ocr_events(
                     vob_events,
                     track=track,
                     episode_id=episode_id,
@@ -332,6 +333,7 @@ class SubtitlePipeline:
                     cancellation_token=cancellation_token,
                 )
                 diag.append(f"Decoded {len(vob_events)} VobSub events; OCR produced {len(cues)} cues")
+                diag.extend(ocr_diagnostics)
             else:
                 raise ToolRecapError(f"Unsupported subtitle format: '{fmt}'")
 
@@ -339,14 +341,17 @@ class SubtitlePipeline:
                 cancellation_token.check_cancelled()
 
             # 3. Save to atomic cache
-            self.cache_manager.save_cues(
-                episode_id=episode_id,
-                source_video=source_video,
-                track=track,
-                cues=cues,
-                source_fingerprint=source_fingerprint,
-                cancellation_token=cancellation_token,
-            )
+            if cues or not track.is_bitmap:
+                # A failed OCR runtime/quality pass can recover later. Never
+                # persist an empty bitmap result as a durable cache hit.
+                self.cache_manager.save_cues(
+                    episode_id=episode_id,
+                    source_video=source_video,
+                    track=track,
+                    cues=cues,
+                    source_fingerprint=source_fingerprint,
+                    cancellation_token=cancellation_token,
+                )
 
             status = "success" if cues else "empty"
             return SubtitlePipelineResult(
@@ -391,10 +396,11 @@ class SubtitlePipeline:
         source_video: Path | str,
         source_duration_ms: int | None = None,
         cancellation_token: CancellationToken | None = None,
-    ) -> tuple[list[SubtitleCue], int]:
+    ) -> tuple[list[SubtitleCue], int, list[str]]:
         """Run bounded local OCR across bitmap subtitle events."""
         cues: list[SubtitleCue] = []
         dropped = 0
+        diagnostics: list[str] = []
 
         for ev in events:
             if cancellation_token:
@@ -434,8 +440,10 @@ class SubtitlePipeline:
                 cues.append(cue)
             else:
                 dropped += 1
+                if ocr_res.reason and ocr_res.reason not in diagnostics and len(diagnostics) < 3:
+                    diagnostics.append(ocr_res.reason)
 
-        return cues, dropped
+        return cues, dropped, diagnostics
 
     def process_subtitles(
         self,

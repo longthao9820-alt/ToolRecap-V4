@@ -44,7 +44,7 @@ from toolrecap_v4.analysis.source_prep.subtitles.cache import (
     SubtitleCacheManager,
     compute_subtitle_cache_key,
 )
-from toolrecap_v4.analysis.source_prep.subtitles.discovery import discover_sidecars, select_best_english_subtitles
+from toolrecap_v4.analysis.source_prep.subtitles.discovery import build_embedded_tracks, discover_sidecars, select_best_english_subtitles
 from toolrecap_v4.analysis.source_prep.subtitles.models import (
     SubtitleCue,
     SubtitleStreamInfo,
@@ -459,6 +459,10 @@ def test_subtitle_pipeline_ocr_quality_gate_dropped_cues(tmp_path: Path):
     assert res.status == "empty"
     assert len(res.cues) == 0
     assert res.dropped_cues_count == 1
+    assert "mock" in res.diagnostics
+    again = pipeline.extract_cues(track, source_video=video, episode_id="show.s01e01")
+    assert again.cached is False
+    assert bad_ocr.call_count == 2
 
 
 # ============================================================================
@@ -552,6 +556,10 @@ def test_source_prep_embedded_mov_text_is_transcoded_to_srt_without_stt(tmp_path
     transcribe = MagicMock(side_effect=AssertionError("mov_text must not fall back to STT"))
     pipeline = SourcePreparationPipeline(
         cache_manager=AnalysisCacheManager(tmp_path / "ep_cache"),
+        subtitle_pipeline=SubtitlePipeline(
+            cache_manager=SubtitleCacheManager(tmp_path / "subtitle_cache"),
+            run_command_fn=mock_run_cmd,
+        ),
         probe_fn=lambda *args, **kwargs: probe_res,
         run_command_fn=mock_run_cmd,
         transcribe_fn=transcribe,
@@ -570,6 +578,16 @@ def test_source_prep_embedded_mov_text_is_transcoded_to_srt_without_stt(tmp_path
     assert command[command.index("-map") + 1] == "0:2"
     assert command[command.index("-c:s") + 1] == "srt"
     assert Path(command[-1]).suffix == ".srt"
+
+
+def test_explicit_english_track_title_recovers_missing_language_tag():
+    streams = [
+        SubtitleStreamInfo(index=2, subtitle_index=0, codec="subrip", language="und", title="English SDH"),
+        SubtitleStreamInfo(index=3, subtitle_index=1, codec="subrip", language="fra", title="French"),
+    ]
+    tracks = build_embedded_tracks(streams, source_video="episode.mkv")
+    chosen = select_best_english_subtitles(tracks).best_english_full
+    assert chosen is not None and chosen.stream_index == 2 and chosen.language == "eng"
 
 
 def test_source_prep_bitmap_ocr_used_when_no_text(tmp_path: Path):
@@ -595,6 +613,52 @@ def test_source_prep_bitmap_ocr_used_when_no_text(tmp_path: Path):
     assert ep.transcript.cues[0].text == "VobSub OCR cue"
 
 
+def test_preparation_tries_next_english_track_and_reuses_result(tmp_path: Path):
+    video = _make_dummy_video(tmp_path / "show.s01e01.mkv")
+    (tmp_path / "show.s01e01.en.srt").write_text("not a valid SRT", encoding="utf-8")
+    embedded = SubtitleStreamInfo(
+        index=2, subtitle_index=0, codec="subrip", language="eng", default=True,
+    )
+    probe_result = _make_default_probe(video, sub_streams=[embedded])
+    commands = []
+
+    def demux(cmd: list[str], **_kwargs: Any) -> CommandResult:
+        commands.append(cmd)
+        Path(cmd[-1]).write_text(SAMPLE_SRT, encoding="utf-8")
+        return CommandResult(exit_code=0, stdout="", stderr="")
+
+    stt = MagicMock(side_effect=AssertionError("STT must not run"))
+    pipeline = SourcePreparationPipeline(
+        cache_manager=AnalysisCacheManager(tmp_path / "analysis"),
+        subtitle_pipeline=SubtitlePipeline(
+            cache_manager=SubtitleCacheManager(tmp_path / "subtitles"), run_command_fn=demux,
+        ),
+        probe_fn=lambda *args, **kwargs: probe_result,
+        transcribe_fn=stt,
+    )
+    first = pipeline.prepare_episode(video, episode_id="E01")
+    second = pipeline.prepare_episode(video, episode_id="E01")
+    assert first.selected_subtitle.track_id == "embedded:2:srt"
+    assert first.transcript.cue_count == 2
+    assert second.artifact_hash == first.artifact_hash
+    assert len(commands) == 1
+    stt.assert_not_called()
+
+
+def test_default_preparation_reports_missing_subtitles_without_whisper(tmp_path: Path):
+    video = _make_dummy_video(tmp_path / "show.s01e01.mkv")
+    probe_result = _make_default_probe(video, sub_streams=[])
+    stt = MagicMock(side_effect=AssertionError("Whisper must not run"))
+    pipeline = SourcePreparationPipeline(
+        cache_manager=AnalysisCacheManager(tmp_path / "analysis"),
+        probe_fn=lambda *args, **kwargs: probe_result,
+        transcribe_fn=stt,
+    )
+    with pytest.raises(ToolRecapError, match="No English full subtitle track"):
+        pipeline.prepare_episode(video, episode_id="E01")
+    stt.assert_not_called()
+
+
 def test_source_prep_stt_fallback_when_no_subtitles(tmp_path: Path):
     video = _make_dummy_video(tmp_path / "show.s01e01.mkv")
     probe_res = _make_default_probe(video, sub_streams=[])
@@ -603,6 +667,7 @@ def test_source_prep_stt_fallback_when_no_subtitles(tmp_path: Path):
         cache_manager=AnalysisCacheManager(tmp_path / "ep_cache"),
         probe_fn=lambda *args, **kwargs: probe_res,
         transcribe_fn=_mock_transcribe_success,
+        allow_stt=True,
     )
 
     ep = pipeline.prepare_episode(video, episode_id="show.s01e01")
@@ -631,6 +696,7 @@ def test_source_prep_new_sidecar_invalidates_old_stt(tmp_path: Path):
         cache_manager=cache_mgr,
         probe_fn=lambda *args, **kwargs: probe_res,
         transcribe_fn=transcribe_mock,
+        allow_stt=True,
     )
 
     # 1. Run 1: No sidecars -> runs STT and caches artifact
@@ -738,6 +804,7 @@ def test_source_prep_silent_audio_handling(tmp_path: Path):
         cache_manager=AnalysisCacheManager(tmp_path / "ep_cache"),
         probe_fn=lambda *args, **kwargs: probe_res,
         transcribe_fn=_mock_transcribe_silent,
+        allow_stt=True,
     )
 
     ep = pipeline.prepare_episode(video, episode_id="quiet")
@@ -873,6 +940,7 @@ def test_transcribe_episode_stt_correct_kwargs_and_duration(tmp_path: Path):
         cache_manager=AnalysisCacheManager(tmp_path / "ep_cache"),
         probe_fn=lambda *args, **kwargs: probe_res,
         transcribe_fn=mock_transcribe,
+        allow_stt=True,
     )
 
     ep = pipeline.prepare_episode(video, episode_id="stt_kwargs")
@@ -898,6 +966,7 @@ def test_stt_status_mapping_and_technical_failures_never_ready_empty(tmp_path: P
         cache_manager=AnalysisCacheManager(tmp_path / "ep_cache"),
         probe_fn=lambda *args, **kwargs: probe_res,
         transcribe_fn=transcribe_cancelled,
+        allow_stt=True,
     )
     with pytest.raises(CancelledError):
         pipeline_cancel.prepare_episode(video, episode_id="stt_cancel")
@@ -910,6 +979,7 @@ def test_stt_status_mapping_and_technical_failures_never_ready_empty(tmp_path: P
         cache_manager=AnalysisCacheManager(tmp_path / "ep_cache"),
         probe_fn=lambda *args, **kwargs: probe_res,
         transcribe_fn=transcribe_failed,
+        allow_stt=True,
     )
     with pytest.raises(ToolRecapError) as exc_info:
         pipeline_failed.prepare_episode(video, episode_id="stt_fail")
@@ -923,6 +993,7 @@ def test_stt_status_mapping_and_technical_failures_never_ready_empty(tmp_path: P
         cache_manager=AnalysisCacheManager(tmp_path / "ep_cache"),
         probe_fn=lambda *args, **kwargs: probe_res,
         transcribe_fn=transcribe_runtime_unavail,
+        allow_stt=True,
     )
     with pytest.raises(ToolRecapError):
         pipeline_unavail.prepare_episode(video, episode_id="stt_unavail")
@@ -935,6 +1006,7 @@ def test_stt_status_mapping_and_technical_failures_never_ready_empty(tmp_path: P
         cache_manager=AnalysisCacheManager(tmp_path / "ep_cache"),
         probe_fn=lambda *args, **kwargs: probe_res,
         transcribe_fn=transcribe_success_empty,
+        allow_stt=True,
     )
     ep = pipeline_empty.prepare_episode(video, episode_id="stt_empty")
     assert ep.status == "empty_transcript"

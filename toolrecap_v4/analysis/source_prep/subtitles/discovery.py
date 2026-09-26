@@ -239,6 +239,10 @@ def build_embedded_tracks(
             fmt = codec
 
         lang = normalize_language_code(s.language)
+        if lang == "und" and re.search(r"(?i)(?<![a-z])(?:english|eng|en-us|en-gb)(?![a-z])", s.title):
+            # Some containers omit the language tag but label the track
+            # explicitly in its title. Unknown titles remain unknown.
+            lang = "eng"
         title_lower = s.title.lower()
         is_forced = s.forced or ("forced" in title_lower) or ("foreign" in title_lower)
 

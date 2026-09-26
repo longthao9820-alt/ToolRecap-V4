@@ -121,10 +121,12 @@ def run_packaged_selfcheck(executable: Path, *, cwd: Path, report_path: Path, en
     _require(report.get("status") in ("PASS", "WARN"), f"Packaged self-check reported fatal failure: {report}")
     _require(report.get("mode") == "frozen", "Self-check did not identify frozen package mode")
     for check_id in (
-        "resources.schema", "media.ffmpeg", "media.ffprobe", "ocr.runtime", "stt.runtime",
+        "resources.schema", "media.ffmpeg", "media.ffprobe", "ocr.runtime", "ocr.models", "stt.runtime",
         "settings.load", "output.resolver", "updater.runtime",
     ):
         _require(_check_by_id(report, check_id).get("status") != "FAIL", f"Required packaged check failed: {check_id}")
+    _require(_check_by_id(report, "ocr.models").get("status") == "PASS",
+             "Bundled OCR models are unavailable in the frozen package")
     return report
 
 
@@ -162,6 +164,17 @@ def build() -> None:
     _require(result.returncode == 0, f"PyInstaller failed with exit code {result.returncode}")
     executable = DIST_DIR / "ToolRecapV4.exe"
     _require(executable.is_file(), f"Portable executable was not created: {executable}")
+    ocr_model_files = (
+        "ch_PP-OCRv4_det_infer.onnx",
+        "ch_PP-OCRv4_rec_infer.onnx",
+        "ch_ppocr_mobile_v2.0_cls_infer.onnx",
+    )
+    ocr_model_paths = [
+        DIST_DIR / "_internal" / "rapidocr_onnxruntime" / "models" / name
+        for name in ocr_model_files
+    ]
+    _require(all(path.is_file() and path.stat().st_size > 0 for path in ocr_model_paths),
+             "Portable OCR runtime is missing one or more bundled ONNX models")
 
     print("[3/7] Adding required runtime resources without user state or model caches...")
     shutil.copy2(ffmpeg, DIST_DIR / "ffmpeg.exe")
@@ -182,8 +195,10 @@ def build() -> None:
             "FFMPEG_LICENSE.txt", "schemas/recap_v3_schema.json",
             "_internal/base_library.zip",
             f"_internal/python{sys.version_info.major}{sys.version_info.minor}.dll",
+            *(str(path.relative_to(DIST_DIR)).replace("\\", "/") for path in ocr_model_paths),
         ],
         "bundled_models": False,
+        "bundled_ocr_models": True,
         "user_state_bundled": False,
     }
     (DIST_DIR / "package_marker.json").write_text(json.dumps(marker, indent=2), encoding="utf-8")

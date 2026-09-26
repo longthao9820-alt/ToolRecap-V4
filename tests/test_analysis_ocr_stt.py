@@ -177,6 +177,15 @@ def test_ocr_model_manager_missing_models(tmp_path):
     assert mgr.is_ready() is False
 
 
+def test_portable_ocr_uses_bundled_models_without_local_cache(tmp_path):
+    adapter = OcrAdapter(model_manager=OcrModelManager(model_dir=tmp_path / "empty-cache"))
+    assert adapter.model_manager.is_ready() is False
+    assert adapter.bundled_models_ready() is True
+    assert adapter.is_engine_ready() is True
+    assert type(adapter._get_engine()).__name__ == "RapidOCR"
+    assert not (tmp_path / "empty-cache").exists()
+
+
 def test_ocr_model_manager_corrupted_hash(tmp_path):
     model_dir = tmp_path / "models" / "ocr"
     model_dir.mkdir(parents=True)

@@ -10,7 +10,7 @@ The application includes saved-project resume, AI Gateway integration, single-wi
 ## Install the portable release
 
 1. Open the repository's **Releases** page.
-2. Download `ToolRecapV4-Windows-x64-v1.0.6.zip` from the latest release.
+2. Download `ToolRecapV4-Windows-x64-v1.0.7.zip` from the latest release.
 3. Extract the entire ZIP to a writable local folder.
 4. Keep the complete extracted `ToolRecapV4` folder together.
 5. Run `ToolRecapV4.exe` from that folder.
@@ -18,6 +18,8 @@ The application includes saved-project resume, AI Gateway integration, single-wi
 7. Choose **Recap** or **Highlight**, select source media, enter the corresponding prompt, and start the workflow.
 
 No separate Python installation is required for normal portable use. FFmpeg, FFprobe, the Python runtime, and required application libraries are included in the one-folder package.
+
+RapidOCR and its local ONNX models are included for image-based subtitles. Recap and Highlight first use verified English subtitle tracks; source preparation does not invoke Whisper automatically. If no usable English subtitle can be extracted, the app reports the track and extraction error.
 
 ## Windows and hardware requirements
 

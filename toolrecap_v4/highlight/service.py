@@ -117,7 +117,8 @@ class HighlightWorkflow:
         self.gateway = gateway_client
         self.settings_manager = settings_manager or SettingsManager(persistence=persistence)
         self.source_pipeline = source_pipeline or SourcePreparationPipeline(
-            cache_manager=AnalysisCacheManager(persistence.root / "cache" / "analysis")
+            cache_manager=AnalysisCacheManager(persistence.root / "cache" / "analysis"),
+            allow_stt=False,
         )
         self.planner = planner
         self.progress_callback = progress_callback
@@ -235,7 +236,7 @@ class HighlightWorkflow:
                 current_item=source["episode_id"], item_event="start",
             )
             cached = self.persistence.load_prepared_episode(project_id, source["episode_id"]) if self.persistence.has_prepared_episode(project_id, source["episode_id"]) else None
-            if cached:
+            if cached and cached.get("transcript_method") != "stt":
                 from toolrecap_v4.analysis.models import PreparedEpisode
                 episode = PreparedEpisode.from_dict(cached)
             else:

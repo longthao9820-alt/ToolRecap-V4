@@ -727,7 +727,7 @@ class ProjectWorkflow:
                 prep_pipeline = (
                     source_preparation_pipeline
                     or self.source_preparation_pipeline
-                    or SourcePreparationPipeline(cache_manager=AnalysisCacheManager(cache_dir=self.persistence.root / "cache" / "analysis"))
+                    or SourcePreparationPipeline(cache_manager=AnalysisCacheManager(cache_dir=self.persistence.root / "cache" / "analysis"), allow_stt=False)
                 )
 
                 prep_episodes: Dict[str, Any] = state.setdefault("prepared_episodes", {})

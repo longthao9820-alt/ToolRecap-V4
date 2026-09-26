@@ -109,9 +109,10 @@ class SourcePreparationPipeline:
         transcribe_fn: Any = transcribe_episode_stt,
         run_command_fn: Any = run_command,
         temp_dir: Path | str | None = None,
+        allow_stt: bool = False,
     ) -> None:
         self.cache_manager = cache_manager or AnalysisCacheManager()
-        self.ocr_adapter = ocr_adapter or OcrAdapter()
+        self.ocr_adapter = ocr_adapter or (subtitle_pipeline.ocr_adapter if subtitle_pipeline else OcrAdapter())
         self.subtitle_pipeline = subtitle_pipeline or SubtitlePipeline(
             ocr_adapter=self.ocr_adapter,
             run_command_fn=run_command_fn,
@@ -122,6 +123,7 @@ class SourcePreparationPipeline:
         self.transcribe_fn = transcribe_fn
         self.run_command_fn = run_command_fn
         self.temp_dir = Path(temp_dir) if temp_dir else None
+        self.allow_stt = allow_stt
 
     def prepare_episode(
         self,
@@ -184,6 +186,18 @@ class SourcePreparationPipeline:
 
         # Determine target asset identity and hash for dependency key
         chosen_track = disc_res.best_english_full
+        eligible_tracks = [
+            track for track in all_tracks
+            if track.language == "eng" and not track.is_forced
+            and track.track_id != (chosen_track.track_id if chosen_track else None)
+        ]
+        eligible_tracks.sort(key=lambda track: (
+            0 if not track.is_bitmap and track.source_type == "sidecar" else
+            1 if not track.is_bitmap and track.source_type == "embedded" else
+            2 if track.source_type == "sidecar" else 3,
+            -track.score, track.track_id,
+        ))
+        candidate_tracks = ([chosen_track] if chosen_track else []) + eligible_tracks
         chosen_track_id: str
         chosen_method: str
         chosen_hash: str
@@ -204,9 +218,9 @@ class SourcePreparationPipeline:
                     chosen_track.source_format,
                 )["stream_hash"]
         else:
-            chosen_track_id = "stt"
-            chosen_method = "stt"
-            if audio_sel.has_audio:
+            chosen_track_id = "stt" if self.allow_stt else "none"
+            chosen_method = chosen_track_id
+            if self.allow_stt and audio_sel.has_audio:
                 chosen_hash = compute_stt_dependency_signature(
                     audio_sel,
                     DEFAULT_STT_MANIFEST,
@@ -215,6 +229,26 @@ class SourcePreparationPipeline:
                 )["stt_hash"]
             else:
                 chosen_hash = "no_audio"
+
+        # All plausible English tracks affect a fallback result. A new or
+        # changed alternative must invalidate the prepared-episode cache.
+        candidate_identity = []
+        for track in candidate_tracks:
+            if track.source_type == "sidecar" and track.source_file:
+                path = Path(track.source_file).resolve()
+                signature = (
+                    compute_vobsub_signature(path)["pair_hash"] if path.suffix.lower() == ".idx"
+                    else compute_sidecar_signature(path)["content_hash"]
+                )
+            else:
+                signature = compute_embedded_track_signature(
+                    p_video, track.stream_index or 0, track.source_format,
+                )["stream_hash"]
+            candidate_identity.append((track.track_id, track.source_format, track.language, track.is_bitmap, signature))
+        chosen_hash = hashlib.sha256(json.dumps(
+            {"primary_hash": chosen_hash, "candidates": candidate_identity, "allow_stt": self.allow_stt},
+            ensure_ascii=False, sort_keys=True,
+        ).encode("utf-8")).hexdigest()
 
         ocr_manifest_hash = DEFAULT_OCR_MANIFEST.compute_manifest_hash()
         stt_manifest_hash = DEFAULT_STT_MANIFEST.compute_manifest_hash()
@@ -231,6 +265,8 @@ class SourcePreparationPipeline:
             "inventory_items": inv_items,
             "selected_track_id": chosen_track_id,
             "selected_method": chosen_method,
+            "subtitle_candidates": [track.track_id for track in candidate_tracks],
+            "allow_stt": self.allow_stt,
             "target_hash": chosen_hash,
             "has_audio": audio_sel.has_audio,
             "audio_global_index": audio_sel.global_index,
@@ -271,29 +307,9 @@ class SourcePreparationPipeline:
                     is_src_valid = (cached_ep.source_fingerprint == src_fingerprint)
                     is_dep_valid = cached_dep == dep_sig
 
-                    # Invalidation rules
-                    better_sub_available = (
-                        cached_ep.transcript_method == "stt"
-                        and chosen_track is not None
-                    )
-                    better_text_available = (
-                        cached_ep.transcript_method == "ocr"
-                        and chosen_track is not None
-                        and not chosen_track.is_bitmap
-                    )
-                    better_sidecar_available = (
-                        cached_ep.transcript_method == "embedded"
-                        and chosen_track is not None
-                        and chosen_track.source_type == "sidecar"
-                    )
-
-                    if (
-                        is_src_valid
-                        and is_dep_valid
-                        and not better_sub_available
-                        and not better_text_available
-                        and not better_sidecar_available
-                    ):
+                    # The cache key includes the complete ordered subtitle
+                    # candidate list and each candidate's content identity.
+                    if is_src_valid and is_dep_valid:
                         _report("complete", 1.0, "Loaded prepared episode from verified cache")
                         return cached_ep
                 except Exception:
@@ -314,15 +330,47 @@ class SourcePreparationPipeline:
 
         if chosen_track is not None:
             # Case A: English Full subtitle candidate available
-            _report("subtitles", 0.45, f"Processing subtitle track: {chosen_track.track_id}")
-            sub_res: SubtitlePipelineResult = self.subtitle_pipeline.extract_cues(
-                chosen_track,
-                source_video=p_video,
-                episode_id=ep_id,
-                source_fingerprint=src_fingerprint,
-                source_duration_ms=probe_res.duration_ms,
-                cancellation_token=cancellation_token,
-            )
+            failed_tracks: list[str] = []
+            for candidate in candidate_tracks:
+                if cancellation_token:
+                    cancellation_token.check_cancelled()
+                _report("subtitles", 0.45, f"Processing subtitle track: {candidate.track_id}")
+                if candidate.is_bitmap and type(self.ocr_adapter) is OcrAdapter:
+                    if not self.ocr_adapter.is_package_installed():
+                        failed_tracks.append(f"{candidate.track_id}: local OCR runtime is unavailable")
+                        continue
+                    if not self.ocr_adapter.is_engine_ready():
+                        try:
+                            _report("ocr_models", 0.45, "Preparing verified local OCR models for bitmap subtitles...")
+                            self.ocr_adapter.model_manager.download_models(cancellation_token=cancellation_token)
+                        except CancelledError:
+                            raise
+                        except Exception as exc:
+                            failed_tracks.append(f"{candidate.track_id}: local OCR model unavailable: {exc}")
+                            continue
+                sub_res: SubtitlePipelineResult = self.subtitle_pipeline.extract_cues(
+                    candidate,
+                    source_video=p_video,
+                    episode_id=ep_id,
+                    source_fingerprint=src_fingerprint,
+                    source_duration_ms=probe_res.duration_ms,
+                    cancellation_token=cancellation_token,
+                )
+                if sub_res.status == "success" and sub_res.has_cues:
+                    chosen_track = candidate
+                    break
+                failed_tracks.append(
+                    f"{candidate.track_id}: {sub_res.status}: "
+                    f"{'; '.join(sub_res.diagnostics) or 'no valid subtitle cues'}"
+                )
+            else:
+                if not self.allow_stt:
+                    raise ToolRecapError(
+                        "No usable English subtitle track. " + "; ".join(failed_tracks)
+                    )
+                sub_res = SubtitlePipelineResult(
+                    track=chosen_track, status="failed", diagnostics=tuple(failed_tracks),
+                )
 
             if sub_res.status == "success" and sub_res.has_cues:
                 selected_subtitle = chosen_track
@@ -463,6 +511,16 @@ class SourcePreparationPipeline:
         else:
             # Case B: No English Full subtitle track discovered -> direct STT fallback
             selected_subtitle = None
+            if self.allow_stt is False and audio_sel.has_audio:
+                inventory = ", ".join(
+                    f"{track.track_id} (language={track.language}, format={track.source_format}, forced={track.is_forced})"
+                    for track in all_tracks
+                ) or "none"
+                probe_error = f" Probe error: {probe_res.subtitle_probe_error}." if probe_res.subtitle_probe_error else ""
+                raise ToolRecapError(
+                    f"No English full subtitle track was found. Available tracks: {inventory}.{probe_error} "
+                    "Source preparation cannot continue without verified subtitles."
+                )
             if not audio_sel.has_audio:
                 # No audio streams in source container
                 status = "no_audio"

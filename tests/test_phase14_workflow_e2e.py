@@ -335,6 +335,7 @@ def test_synthetic_media_variants_use_real_probe_and_source_preparation(tmp_path
     pipeline = SourcePreparationPipeline(
         cache_manager=AnalysisCacheManager(cache_dir=tmp_path / "cache"),
         transcribe_fn=fake_stt,
+        allow_stt=True,
     )
     prepared_audio = pipeline.prepare_episode(audio_only_dialogue, episode_id="E01", source_id="E01")
     assert prepared_audio.transcript_method == "stt"

@@ -195,8 +195,11 @@ def collect_selfcheck(*, storage_root: Path | str | None = None) -> SelfCheckRes
         ocr_message if ocr_ok else f"OCR runtime unavailable: {ocr_message}", True, ocr_versions,
     ))
     if ocr_ok:
-        from toolrecap_v4.analysis.source_prep.subtitles.ocr import OcrModelManager
-        ocr_models = OcrModelManager(model_dir=state_root / "models" / "ocr").are_models_available()
+        from toolrecap_v4.analysis.source_prep.subtitles.ocr import OcrAdapter, OcrModelManager
+        ocr_models = (
+            OcrModelManager(model_dir=state_root / "models" / "ocr").is_ready()
+            or OcrAdapter.bundled_models_ready()
+        )
         checks.append(SelfCheckItem(
             "ocr.models", "OCR / STT RUNTIME", PASS if ocr_models else WARN,
             "OCR models are available" if ocr_models else "OCR models are optional/downloadable and not currently present",
