@@ -31,10 +31,31 @@ INVALID_WINDOWS_CHARS = set('<>:"/\\|?*')
 CONTROL_CHARS = {chr(i) for i in range(32)}
 ALL_INVALID_CHARS = INVALID_WINDOWS_CHARS | CONTROL_CHARS
 
-SECRET_KEY_PATTERNS = re.compile(
-    r"(api[_-]?key|secret|token|password|auth|credential|private[_-]?key)",
-    re.IGNORECASE,
-)
+SECRET_FIELD_TOKENS = frozenset({
+    "secret", "secrets", "token", "password", "passwd", "auth",
+    "credential", "credentials",
+})
+SECRET_FIELD_EXACT = frozenset({"api_key", "apikey", "private_key", "privatekey"})
+FIELD_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+
+
+def _is_secret_field_name(key: str) -> bool:
+    """Recognize credential field identifiers without treating data keys as fields.
+
+    Mapping keys such as source basenames may legitimately contain words like
+    ``Secrets``.  A secret-bearing field must first look like a programming/
+    JSON field identifier; filenames with spaces or extensions are therefore
+    data identities, not schema field names.
+    """
+    if not FIELD_IDENTIFIER.fullmatch(key):
+        return False
+    normalized = key.casefold().replace("-", "_")
+    if normalized in SECRET_FIELD_EXACT:
+        return True
+    tokens = tuple(part for part in normalized.split("_") if part)
+    if any(token in SECRET_FIELD_TOKENS for token in tokens):
+        return True
+    return len(tokens) >= 2 and tokens[-2:] in (("api", "key"), ("private", "key"))
 
 
 def validate_windows_name(name: str, field_name: str = "name") -> None:
@@ -80,7 +101,7 @@ def check_for_secrets(data: Any, path: str = "$") -> None:
         for k, v in data.items():
             if not isinstance(k, str):
                 continue
-            if SECRET_KEY_PATTERNS.search(k):
+            if _is_secret_field_name(k):
                 raise SecretExposureError(
                     f"Forbidden secret key detected at {path}.{k}. Secrets must never be stored in project JSON."
                 )

@@ -19,7 +19,7 @@ from toolrecap_v4.errors import (
     WindowsNameError,
     WindowsReservedNameError,
 )
-from toolrecap_v4.validator import validate_project, validate_windows_name
+from toolrecap_v4.validator import check_for_secrets, validate_project, validate_windows_name
 
 
 def get_base_valid_project() -> dict:
@@ -249,6 +249,20 @@ def test_secrets_rejected_in_validator() -> None:
 
     with pytest.raises(SecretExposureError, match="Forbidden secret key detected"):
         validate_project(data)
+
+
+def test_source_filename_containing_secrets_is_not_a_credential_field() -> None:
+    data = get_base_valid_project()
+    original = data["sources"][0]["source_file"]
+    filename = "Blue Bloods - 3x09 - Secrets and Lies.mp4"
+    data["sources"][0]["source_file"] = filename
+    data["outputs"][0]["segments"][0]["source_file"] = filename
+    data["source_fingerprints"] = {
+        filename: {"basename": filename, "path": "D:/TV/" + filename}
+    }
+    # Secret scanning must accept arbitrary source identity keys.  Schema may
+    # independently reject extra project fields, so exercise the guard itself.
+    check_for_secrets(data)
 
 
 def test_cancellation_in_validator() -> None:
