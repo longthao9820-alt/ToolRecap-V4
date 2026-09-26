@@ -69,7 +69,7 @@ def extract_embedded_subtitle_stream(
         "-map", f"0:{stream_index}",
     ]
 
-    if fmt in ("srt", "subrip") or codec_lower in ("subrip", "srt"):
+    if fmt in ("srt", "subrip", "mov_text", "tx3g") or codec_lower in ("subrip", "srt", "mov_text", "tx3g"):
         cmd.extend(["-c:s", "srt", str(p_out)])
     elif fmt in ("ass", "ssa") or codec_lower in ("ass", "ssa"):
         cmd.extend(["-c:s", "ass", str(p_out)])
@@ -236,7 +236,7 @@ class SubtitlePipeline:
                 base_tmp.mkdir(parents=True, exist_ok=True)
                 nonce = uuid.uuid4().hex[:8]
 
-                if fmt in ("srt", "subrip"):
+                if fmt in ("srt", "subrip", "mov_text", "tx3g"):
                     ext = "srt"
                 elif fmt in ("ass", "ssa"):
                     ext = "ass"
@@ -274,7 +274,7 @@ class SubtitlePipeline:
                 cancellation_token.check_cancelled()
 
             # Format-specific parsing & OCR
-            if fmt in ("srt", "subrip"):
+            if fmt in ("srt", "subrip", "mov_text", "tx3g"):
                 cues = parse_srt(
                     file_to_parse,
                     source_type=track.source_type,

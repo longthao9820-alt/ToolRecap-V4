@@ -530,6 +530,48 @@ def test_source_prep_embedded_text_used_when_no_sidecar(tmp_path: Path):
     assert len(ep.transcript.cues) == 2
 
 
+def test_source_prep_embedded_mov_text_is_transcoded_to_srt_without_stt(tmp_path: Path):
+    video = _make_dummy_video(tmp_path / "Blue Bloods - 3x01 - Family Business.mp4")
+    sub_stream = SubtitleStreamInfo(
+        index=2,
+        subtitle_index=0,
+        codec="mov_text",
+        language="eng",
+        title="English",
+        default=True,
+    )
+    probe_res = _make_default_probe(video, sub_streams=[sub_stream])
+    captured_commands: list[list[str]] = []
+
+    def mock_run_cmd(cmd: list[str], **kwargs: Any) -> CommandResult:
+        captured_commands.append(cmd)
+        output_path = Path(cmd[-1])
+        output_path.write_text(SAMPLE_SRT, encoding="utf-8")
+        return CommandResult(exit_code=0, stdout="", stderr="")
+
+    transcribe = MagicMock(side_effect=AssertionError("mov_text must not fall back to STT"))
+    pipeline = SourcePreparationPipeline(
+        cache_manager=AnalysisCacheManager(tmp_path / "ep_cache"),
+        probe_fn=lambda *args, **kwargs: probe_res,
+        run_command_fn=mock_run_cmd,
+        transcribe_fn=transcribe,
+    )
+
+    episode = pipeline.prepare_episode(video, episode_id="E01")
+
+    assert episode.transcript_method == "embedded"
+    assert episode.fallback is False
+    assert episode.selected_subtitle is not None
+    assert episode.selected_subtitle.source_format == "srt"
+    assert episode.transcript.cue_count == 2
+    assert transcribe.call_count == 0
+    assert len(captured_commands) == 1
+    command = captured_commands[0]
+    assert command[command.index("-map") + 1] == "0:2"
+    assert command[command.index("-c:s") + 1] == "srt"
+    assert Path(command[-1]).suffix == ".srt"
+
+
 def test_source_prep_bitmap_ocr_used_when_no_text(tmp_path: Path):
     video = _make_dummy_video(tmp_path / "show.s01e01.mkv")
     idx_path = tmp_path / "show.s01e01.en.idx"
@@ -1056,4 +1098,3 @@ def test_embedded_vobsub_demux_paired_output_validation(tmp_path: Path):
             run_command_fn=mock_bad_vobsub,
         )
     assert "paired VobSub files" in str(exc_info.value)
-

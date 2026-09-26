@@ -225,7 +225,7 @@ def build_embedded_tracks(
     for s in streams:
         codec = s.codec.lower()
         is_bitmap = codec in bitmap_codecs or s.is_bitmap
-        if codec in ("subrip", "srt"):
+        if codec in ("subrip", "srt", "mov_text", "tx3g"):
             fmt = "srt"
         elif codec in ("ass", "ssa"):
             fmt = "ass"

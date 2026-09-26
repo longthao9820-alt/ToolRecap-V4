@@ -10,7 +10,7 @@ The application includes saved-project resume, AI Gateway integration, single-wi
 ## Install the portable release
 
 1. Open the repository's **Releases** page.
-2. Download `ToolRecapV4-Windows-x64-v1.0.2.zip` from the latest release.
+2. Download `ToolRecapV4-Windows-x64-v1.0.3.zip` from the latest release.
 3. Extract the entire ZIP to a writable local folder.
 4. Keep the complete extracted `ToolRecapV4` folder together.
 5. Run `ToolRecapV4.exe` from that folder.
