@@ -8,6 +8,7 @@ from toolrecap_v4.analysis.finalizer.planner import PlannerDraft,DraftOutput,Vis
 from toolrecap_v4.analysis.vision.frames import build_visual_requests
 from toolrecap_v4.analysis.vision import VisionConfig,VisualEvidenceService
 from toolrecap_v4.errors import VisionValidationError,VisualRequestError
+from toolrecap_v4.gateway import GatewayResult
 
 @pytest.mark.parametrize("vr",[
     VisualRangeRequest("E99",0,1,"x"),
@@ -56,4 +57,36 @@ def test_phase4_evidence_artifacts_are_not_mutated(tmp_path):
 def test_vision_prompt_is_factual_and_bounded(tmp_path):
     _,episodes,draft,rev=env(tmp_path);gw=Gateway();VisualEvidenceService(gw,tmp_path,VisionConfig("v"),FakeExtractor(tmp_path)).run(project_id="project-1",draft=draft,planner_draft_hash="h",episodes=episodes,evidence_revision=rev)
     prompt=json.loads(gw.images[0]["prompt"]);assert prompt["purpose_question"]=="verify entrant" and "complete_packed_catalog" not in prompt
+    contract=prompt["response_contract"];template=contract["template"]
+    assert contract["additional_properties"] is False
+    assert template["visual_request_id"]=="VR-E01-001" and template["episode_id"]=="E01"
+    assert [row["frame_id"] for row in template["frames"]]==["E01-FR-0001","E01-FR-0002"]
     system=gw.images[0]["system_prompt"].lower();assert "factual" in system and "no ranking" in system and "narration" in system
+
+def test_reported_observations_wrapper_is_repaired_with_exact_contract(tmp_path):
+    class ContractRepairGateway:
+        def __init__(self):self.calls=[]
+        def submit_image_chat(self,**kwargs):
+            self.calls.append(kwargs);payload=json.loads(kwargs["prompt"])
+            if len(self.calls)==1:
+                return GatewayResult(raw_response=json.dumps({
+                    "protocol_version":"visual-evidence-v1",
+                    "visual_request_id":"VR-E01-001",
+                    "observations":[
+                        {"frame_id":"E01-FR-0001","timestamp_ms":1000,"observation":"Two people stand in a hallway."},
+                        {"frame_id":"E01-FR-0002","timestamp_ms":2999,"observation":"The same people face each other."},
+                    ],
+                }))
+            assert payload["task"].startswith("Correct only technical JSON contract defects")
+            assert "required_response_contract" in payload
+            repaired=payload["required_response_contract"]["template"]
+            repaired["range_observation"]="Two people interact in the selected interior range."
+            repaired["entities"]=[];repaired["objects"]=[];repaired["on_screen_text"]=[];repaired["uncertainty"]=[]
+            return GatewayResult(raw_response=json.dumps(repaired))
+
+    _,episodes,draft,rev=env(tmp_path);gateway=ContractRepairGateway()
+    result=VisualEvidenceService(gateway,tmp_path,VisionConfig("vision",repair_attempts=1),FakeExtractor(tmp_path)).run(project_id="project-1",draft=draft,planner_draft_hash="h",episodes=episodes,evidence_revision=rev)
+    assert len(gateway.calls)==2 and result.evidence[0].observation.startswith("Two people")
+    base=tmp_path/"projects"/"project-1"/"visual"/result.visual_revision
+    raw_manifest=json.loads((base/"VR-E01-001.raw.manifest.json").read_text())
+    assert raw_manifest["attempt"]==1 and raw_manifest["validation_status"]=="VALID"
