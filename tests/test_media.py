@@ -338,6 +338,24 @@ def test_audio_selector_scenario_c_english_normal_vs_foreign_default() -> None:
     assert result.warning is None
 
 
+def test_audio_selector_prefers_english_among_many_foreign_tracks() -> None:
+    streams = [
+        AudioStreamInfo(1, "aac", 2, 48000, language="ukr", title="Ukrainian Dub", disposition={"default": 1}),
+        AudioStreamInfo(2, "aac", 2, 48000, language="rus", title="Russian Dub", disposition={"default": 0}),
+        AudioStreamInfo(3, "aac", 2, 48000, language="jpn", title="Japanese Dub", disposition={"default": 0}),
+        AudioStreamInfo(4, "aac", 6, 48000, language="eng", title="English Original", disposition={"default": 0}),
+        AudioStreamInfo(5, "aac", 2, 48000, language="eng", title="English Commentary", disposition={"commentary": 1}),
+    ]
+
+    result = select_audio_stream(streams)
+
+    assert result.selected_index == 4
+    assert result.selected_stream is not None
+    assert result.selected_stream.language == "eng"
+    assert result.selected_stream.title == "English Original"
+    assert result.warning is None
+
+
 def test_audio_selector_scenario_d_fallback_default_with_warning() -> None:
     """Scenario D: No English tracks; fall back to default track with warning.
     

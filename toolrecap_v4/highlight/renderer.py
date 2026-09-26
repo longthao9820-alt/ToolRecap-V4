@@ -46,6 +46,8 @@ def render_highlight(
     encoder_status: EncoderStatus | None = None,
     source_codec: str = "h264",
     source_pixel_format: str = "",
+    source_audio_index: int | None = None,
+    source_audio_language: str = "",
     command_runner: Callable[..., CommandResult] = run_command,
     cancellation_token: CancellationToken | None = None,
 ) -> HighlightRenderResult:
@@ -86,14 +88,21 @@ def render_highlight(
             if selected_encoder.encoder == "h264_nvenc" and decode_args
             else []
         )
+        audio_map = f"0:{source_audio_index}" if source_audio_index is not None and source_audio_index >= 0 else "0:a?"
+        audio_metadata = (
+            ["-metadata:s:a:0", f"language={source_audio_language}"]
+            if source_audio_language.strip()
+            else []
+        )
         args = [
             str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
             "-accurate_seek", "-ss", f"{output.start_ms / 1000.0:.3f}",
             *decode_args, "-i", str(source),
-            "-t", f"{duration:.3f}", "-map", "0:v:0", "-map", "0:a?",
+            "-t", f"{duration:.3f}", "-map", "0:v:0", "-map", audio_map,
             *nvenc_format_args,
             *video_args,
-            "-c:a", "aac", "-b:a", "192k", "-avoid_negative_ts", "make_zero",
+            "-c:a", "aac", "-b:a", "192k", *audio_metadata,
+            "-avoid_negative_ts", "make_zero",
             str(staged_video),
         ]
         try:

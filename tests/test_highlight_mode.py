@@ -8,10 +8,13 @@ from toolrecap_v4.highlight.models import build_highlight_project
 from toolrecap_v4.highlight.renderer import render_highlight
 from toolrecap_v4.highlight.service import HighlightPlanner
 from toolrecap_v4.highlight.subtitles import highlight_srt
-from toolrecap_v4.media import CommandResult
+from toolrecap_v4.media import (
+    AudioStreamInfo, CommandResult, find_binary, probe_media, run_command,
+    select_audio_for_source,
+)
 from toolrecap_v4.media import EncoderStatus
 from toolrecap_v4.settings import AppSettings
-from toolrecap_v4.analysis.models import PreparedEpisode, Transcript, TranscriptCue
+from toolrecap_v4.analysis.models import AudioSelection, PreparedEpisode, Transcript, TranscriptCue
 from toolrecap_v4.discovery import compute_file_fingerprint
 from toolrecap_v4.highlight.renderer import HighlightRenderResult
 from toolrecap_v4.highlight.service import HighlightWorkflow
@@ -93,7 +96,7 @@ def test_episode_then_season_coverage_has_no_quota_and_secondary_characters():
     assert all("guest moment" in row["title"] for row in rows)
 
 
-def test_direct_renderer_preserves_original_audio_and_publishes_mp4_srt(tmp_path: Path):
+def test_direct_renderer_maps_only_selected_english_audio_and_publishes_mp4_srt(tmp_path: Path):
     source = tmp_path / "e01.mp4"; source.write_bytes(b"source")
     ffmpeg = tmp_path / "ffmpeg.exe"; ffmpeg.write_bytes(b"binary")
     project = build_highlight_project(project_id="p", prompt="x", dependency_revision="r", candidates=[candidate()], sources=SOURCES)
@@ -101,11 +104,52 @@ def test_direct_renderer_preserves_original_audio_and_publishes_mp4_srt(tmp_path
     def runner(args, **kwargs):
         commands.append(args); Path(args[-1]).write_bytes(b"rendered-original-audio")
         return CommandResult(0, "", "")
-    result = render_highlight(project.outputs[0], sources={"e01.mp4": source}, publication_dir=tmp_path / "publication", ffmpeg_path=ffmpeg, command_runner=runner, settings=AppSettings(use_gpu=False))
+    result = render_highlight(
+        project.outputs[0], sources={"e01.mp4": source},
+        publication_dir=tmp_path / "publication", ffmpeg_path=ffmpeg,
+        command_runner=runner, settings=AppSettings(use_gpu=False),
+        source_audio_index=2, source_audio_language="eng",
+    )
     assert result.video_path.is_file() and result.subtitle_path.is_file()
     command = commands[0]
-    assert "0:a?" in command and "atempo" not in " ".join(command).lower()
+    assert "0:2" in command and "0:a?" not in command
+    assert command[command.index("-metadata:s:a:0") + 1] == "language=eng"
+    assert "atempo" not in " ".join(command).lower()
     assert sorted(p.suffix for p in result.video_path.parent.iterdir()) == [".mp4", ".srt"]
+
+
+def test_real_highlight_output_contains_only_english_from_multilingual_source(tmp_path: Path):
+    ffmpeg = find_binary("ffmpeg")
+    source = tmp_path / "multilingual.mp4"
+    create = [
+        str(ffmpeg), "-y",
+        "-f", "lavfi", "-i", "color=c=blue:s=320x240:r=25:d=1",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+        "-f", "lavfi", "-i", "sine=frequency=880:duration=1",
+        "-map", "0:v:0", "-map", "1:a:0", "-map", "2:a:0",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+        "-metadata:s:a:0", "language=ukr", "-metadata:s:a:0", "title=Ukrainian Dub",
+        "-metadata:s:a:1", "language=eng", "-metadata:s:a:1", "title=English Original",
+        "-disposition:a:0", "default", "-disposition:a:1", "0", str(source),
+    ]
+    assert run_command(create, timeout=30).exit_code == 0
+    source_probe = probe_media(source)
+    selection = select_audio_for_source(source_probe)
+    assert selection.selected_index == 2
+
+    project = build_highlight_project(
+        project_id="p", prompt="x", dependency_revision="r",
+        candidates=[candidate(start_ms=0, end_ms=800, subtitle_cues=[])], sources=SOURCES,
+    )
+    result = render_highlight(
+        project.outputs[0], sources={"e01.mp4": source}, publication_dir=tmp_path / "out",
+        settings=AppSettings(use_gpu=False), source_audio_index=selection.selected_index,
+        source_audio_language=selection.selected_stream.language,
+    )
+
+    output_probe = probe_media(result.video_path)
+    assert len(output_probe.audio_streams) == 1
+    assert output_probe.audio_streams[0].language == "eng"
 
 
 def test_highlight_prompt_is_separate_and_speed_is_irrelevant():
@@ -130,6 +174,7 @@ def test_highlight_nvidia_command_uses_cuvid_nvenc_no_copy_and_exact_bounds(tmp_
         ffmpeg_path=ffmpeg, command_runner=runner, settings=AppSettings(use_gpu=True),
         encoder_status=EncoderStatus(True, "RTX 3060", "h264_nvenc", "NVIDIA NVENC"),
         source_codec="hevc", source_pixel_format="yuv420p10le",
+        source_audio_index=3, source_audio_language="eng",
     )
     args = commands[0]
     assert "hevc_cuvid" in args and "h264_nvenc" in args
@@ -137,7 +182,7 @@ def test_highlight_nvidia_command_uses_cuvid_nvenc_no_copy_and_exact_bounds(tmp_
     assert not any(args[index:index + 2] == ["-c:v", "copy"] for index in range(len(args) - 1))
     assert args[args.index("-ss") + 1] == "10.000"
     assert args[args.index("-t") + 1] == "10.000"
-    assert "0:a?" in args
+    assert "0:3" in args and "0:a?" not in args
 
 
 def test_highlight_resume_reuses_plan_and_completed_publication(tmp_path: Path, monkeypatch):
@@ -154,8 +199,18 @@ def test_highlight_resume_reuses_plan_and_completed_publication(tmp_path: Path, 
         "outputs": {}, "timestamps": {},
     }
     persistence.save_project(state)
+    english_audio = AudioStreamInfo(
+        2, "aac", 2, 48000, language="eng", title="English Original",
+        disposition={"default": 0},
+    )
     prepared = PreparedEpisode(
         "E01", "src_001", source, 60_000, 1920, 1080, source_fingerprint=fingerprint.sha256,
+        audio_streams=(
+            AudioStreamInfo(1, "aac", 2, 48000, language="ukr", title="Ukrainian Dub", disposition={"default": 1}),
+            english_audio,
+        ),
+        audio_selection=AudioSelection(english_audio, global_index=2, audio_ordinal=1),
+        selected_audio=english_audio, audio_ordinal=1,
         transcript=Transcript(episode_id="E01", source_type="sidecar", source_format="srt",
                               cues=(TranscriptCue("c1", 12_250, 13_500, "You heard me."),)),
     )
@@ -181,10 +236,13 @@ def test_highlight_resume_reuses_plan_and_completed_publication(tmp_path: Path, 
         return HighlightRenderResult(output.output_id, video, subtitle, hashlib.sha256(b"video").hexdigest(), hashlib.sha256(b"srt").hexdigest())
     monkeypatch.setattr("toolrecap_v4.highlight.service.ScannerService", Scanner)
     monkeypatch.setattr("toolrecap_v4.highlight.service.EvidenceStore", Store)
-    monkeypatch.setattr("toolrecap_v4.highlight.service.render_highlight", lambda *a, **k: (renders.append(1) or fake_render(*a, **k)))
+    monkeypatch.setattr("toolrecap_v4.highlight.service.render_highlight", lambda *a, **k: (renders.append(k) or fake_render(*a, **k)))
     planner = Planner()
     workflow = HighlightWorkflow(persistence=persistence, gateway_client=FakeGateway(), planner=planner)
     first = workflow.run("highlight-project", settings=settings)
     second = workflow.run("highlight-project", settings=settings)
     assert first["project_mode"] == second["project_mode"] == "HIGHLIGHT"
     assert planner.calls == 1 and len(renders) == 1
+    assert renders[0]["source_audio_index"] == 2
+    assert renders[0]["source_audio_language"] == "eng"
+    assert second["outputs"]["hl_001"]["audio_selection_version"] == "highlight-audio-selection-v1"

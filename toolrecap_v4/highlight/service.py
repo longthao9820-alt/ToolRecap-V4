@@ -24,6 +24,7 @@ from .models import HighlightProject, build_highlight_project, highlight_depende
 from .renderer import render_highlight
 
 HIGHLIGHT_PLAN_VERSION = "highlight-plan-v1"
+HIGHLIGHT_AUDIO_SELECTION_VERSION = "highlight-audio-selection-v1"
 HIGHLIGHT_SYSTEM_PROMPT = """You select worthwhile, naturally continuous original scenes for Highlight Mode.
 The editorial prompt controls what to find, but this protocol controls the response.
 Return only JSON: {"candidates":[{"title":str,"episode_id":str,"source_id":str,
@@ -319,6 +320,10 @@ class HighlightWorkflow:
             )
             for episode in prepared
         }
+        source_audio_selections = {
+            (episode.source_basename or episode.source_path.name): episode.audio_selection
+            for episode in prepared
+        }
         for index, output in enumerate(project.outputs, 1):
             self._emit(
                 "Rendering Highlights", "Rendering highlight...", index - 1, len(project.outputs),
@@ -327,10 +332,24 @@ class HighlightWorkflow:
             existing = state["outputs"].get(output.output_id, {})
             video_path = Path(existing.get("video_path", ""))
             subtitle_path = Path(existing.get("subtitle_path", ""))
+            audio_selection = source_audio_selections.get(output.source_file)
+            source_audio_index = (
+                audio_selection.global_index
+                if audio_selection is not None and audio_selection.has_audio
+                else None
+            )
+            source_audio_language = (
+                audio_selection.selected_stream.language
+                if audio_selection is not None and audio_selection.selected_stream is not None
+                else ""
+            )
             if (
                 existing.get("status") == "completed" and video_path.is_file() and subtitle_path.is_file()
                 and _file_sha(video_path) == existing.get("video_sha256")
                 and _file_sha(subtitle_path) == existing.get("subtitle_sha256")
+                and existing.get("audio_selection_version") == HIGHLIGHT_AUDIO_SELECTION_VERSION
+                and existing.get("source_audio_index") == source_audio_index
+                and existing.get("source_audio_language", "") == source_audio_language
             ):
                 self._emit(
                     "Rendering Highlights", "Reused completed Highlight checkpoint.", index, len(project.outputs),
@@ -341,6 +360,8 @@ class HighlightWorkflow:
                 output, sources=source_paths, publication_dir=publication,
                 settings=cfg, source_codec=source_codecs.get(output.source_file, "h264"),
                 source_pixel_format=source_pixel_formats.get(output.source_file, ""),
+                source_audio_index=source_audio_index,
+                source_audio_language=source_audio_language,
                 cancellation_token=cancellation_token,
             )
             self._emit(
@@ -351,6 +372,9 @@ class HighlightWorkflow:
             state["outputs"][output.output_id] = {
                 "status": "completed", "video_path": str(result.video_path), "subtitle_path": str(result.subtitle_path),
                 "video_sha256": result.video_sha256, "subtitle_sha256": result.subtitle_sha256,
+                "audio_selection_version": HIGHLIGHT_AUDIO_SELECTION_VERSION,
+                "source_audio_index": source_audio_index,
+                "source_audio_language": source_audio_language,
                 "original_subtitle_state": result.original_subtitle_state,
                 "original_subtitle_cue_count": result.original_subtitle_cue_count,
             }
